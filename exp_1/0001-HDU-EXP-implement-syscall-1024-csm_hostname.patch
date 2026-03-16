@@ -1,0 +1,101 @@
+From 3a57d2fefabf0d11f1b1bd9b77e63c6a7302dc44 Mon Sep 17 00:00:00 2001
+From: Rong Bao <rong.bao@csmantle.top>
+Date: Sun, 15 Mar 2026 19:53:34 +0800
+Subject: [PATCH] HDU-EXP: implement syscall 1024 csm_hostname
+
+        void csm_hostname(int is_set, char *name, int size);
+---
+ include/linux/syscalls.h |  3 +++
+ kernel/sys.c             | 41 ++++++++++++++++++++++++++++++++++++++++
+ kernel/sys_ni.c          |  3 +++
+ scripts/syscall.tbl      |  3 +++
+ 4 files changed, 50 insertions(+)
+
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index cf84d98964b2..475ec5f4ecbb 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -1227,6 +1227,9 @@ asmlinkage long sys_ni_syscall(void);
+ 
+ asmlinkage long sys_ni_posix_timers(void);
+ 
++/* csmantle */
++asmlinkage long sys_csm_hostname(int is_set, char __user *name, int len);
++
+ /*
+  * Kernel code should not call syscalls (i.e., sys_xyzyyz()) directly.
+  * Instead, use one of the functions which work equivalently, such as
+diff --git a/kernel/sys.c b/kernel/sys.c
+index 8b58eece4e58..bffba81da085 100644
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -3034,3 +3034,44 @@ COMPAT_SYSCALL_DEFINE1(sysinfo, struct compat_sysinfo __user *, info)
+ 	return 0;
+ }
+ #endif /* CONFIG_COMPAT */
++
++SYSCALL_DEFINE3(csm_hostname, int, is_set, char __user *, name, int, len)
++{
++	int errno;
++	char tmp[__NEW_UTS_LEN + 1];
++
++	if (is_set) {
++		if (!ns_capable(current->nsproxy->uts_ns->user_ns,
++				CAP_SYS_ADMIN))
++			return -EPERM;
++		if (len < 0 || len > __NEW_UTS_LEN)
++			return -EINVAL;
++		errno = -EFAULT;
++		if (!copy_from_user(tmp, name, len)) {
++			struct new_utsname *u;
++			down_write(&uts_sem);
++			u = utsname();
++			memcpy(u->nodename, tmp, len);
++			memset(u->nodename + len, 0, sizeof(u->nodename) - len);
++			errno = 0;
++			uts_proc_notify(UTS_PROC_HOSTNAME);
++			up_write(&uts_sem);
++		}
++	} else {
++		int i;
++		struct new_utsname *u;
++		if (len < 0)
++			return -EINVAL;
++		down_read(&uts_sem);
++		u = utsname();
++		i = 1 + strlen(u->nodename);
++		if (i > len)
++			i = len;
++		memcpy(tmp, u->nodename, i);
++		up_read(&uts_sem);
++		if (copy_to_user(name, tmp, i))
++			return -EFAULT;
++		errno = 0;
++	}
++	return errno;
++}
+diff --git a/kernel/sys_ni.c b/kernel/sys_ni.c
+index bf5d05c635ff..944aaeb44d55 100644
+--- a/kernel/sys_ni.c
++++ b/kernel/sys_ni.c
+@@ -393,3 +393,6 @@ COND_SYSCALL(rseq);
+ 
+ COND_SYSCALL(uretprobe);
+ COND_SYSCALL(uprobe);
++
++/* csmantle */
++COND_SYSCALL(csm_hostname);
+diff --git a/scripts/syscall.tbl b/scripts/syscall.tbl
+index e74868be513c..340fab3dff93 100644
+--- a/scripts/syscall.tbl
++++ b/scripts/syscall.tbl
+@@ -411,3 +411,6 @@
+ 468	common	file_getattr			sys_file_getattr
+ 469	common	file_setattr			sys_file_setattr
+ 470	common	listns				sys_listns
++
++# csmantle
++1024	common	csm_hostname			sys_csm_hostname
+-- 
+2.53.0
+
