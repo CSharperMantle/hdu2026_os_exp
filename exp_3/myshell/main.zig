@@ -37,16 +37,11 @@ fn exec(alloc: std.mem.Allocator, command: cmd.Command, prev_read: ?std.posix.fd
     for (command.argv.items, 0..) |arg, i| {
         argv_z[i] = (try alloc.dupeZ(u8, arg)).ptr;
     }
-    defer for (argv_z) |arg| if (arg) alloc.free(arg);
 
-    try std.posix.execvpeZ(argv_z[0].?, argv_z.ptr, std.c.environ);
-
-    unreachable;
+    return std.posix.execvpeZ(argv_z[0].?, argv_z.ptr, std.c.environ);
 }
 
-fn executePipeline(alloc: std.mem.Allocator, pipeline: *const cmd.Pipeline) !void {
-    const stderr = std.fs.File.stderr().writer(&.{});
-
+fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *const cmd.Pipeline) !void {
     if (pipeline.commands.items.len == 0) return;
 
     var pids = try alloc.alloc(std.posix.pid_t, pipeline.commands.items.len);
@@ -65,7 +60,7 @@ fn executePipeline(alloc: std.mem.Allocator, pipeline: *const cmd.Pipeline) !voi
         const pid = try std.posix.fork();
         if (pid == 0) {
             exec(alloc, command, prev_read, pipefd) catch |err| {
-                stderr.print("{s}: {s}\n", .{ argv0, @errorName(err) });
+                log.print("{s}: {s}\n", .{ argv0, @errorName(err) }) catch {};
                 std.posix.exit(127);
             };
             unreachable;
@@ -98,7 +93,8 @@ pub fn main() !void {
     }
     const alloc = gpa.allocator();
 
-    const stderr = std.fs.File.stderr().writer(&.{});
+    var stderr_writer = std.fs.File.stdout().writer(&.{});
+    const stderr: *std.io.Writer = &stderr_writer.interface;
 
     const argv = try std.process.argsAlloc(alloc);
     const argv0 = if (argv.len > 0) argv[0] else "";
@@ -119,7 +115,7 @@ pub fn main() !void {
         };
         defer pipeline.deinit(alloc);
 
-        executePipeline(alloc, &pipeline) catch |err| {
+        executePipeline(alloc, stderr, &pipeline) catch |err| {
             stderr.print("{s}\n", .{@errorName(err)}) catch {};
         };
     }
