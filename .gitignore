@@ -1,4 +1,6 @@
 /exp_*/*.pdf
+.zig-cache/
+.tmp*
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,rust,rust-analyzer,zig
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,rust,rust-analyzer,zig
