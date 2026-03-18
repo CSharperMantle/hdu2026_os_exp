@@ -84,14 +84,7 @@ fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *con
 }
 
 pub fn main() !void {
-    var gpa: std.heap.DebugAllocator(.{}) = .init;
-    defer {
-        const status = gpa.deinit();
-        if (status != .ok) {
-            @panic("Memory leak detected");
-        }
-    }
-    const alloc = gpa.allocator();
+    const alloc = std.heap.page_allocator;
 
     var stderr_writer = std.fs.File.stdout().writer(&.{});
     const stderr: *std.io.Writer = &stderr_writer.interface;
