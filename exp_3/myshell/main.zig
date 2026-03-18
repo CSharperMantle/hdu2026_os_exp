@@ -68,13 +68,17 @@ fn execBuiltin(log: *std.io.Writer, command: *const cmd.Command, in_parent: bool
         };
         return exitOr(0, in_parent);
     } else if (std.mem.eql(u8, name, "pwd")) {
-        var buf: [std.posix.PATH_MAX]u8 = undefined;
-        const cwd = std.posix.getcwd(&buf) catch |err| {
+        var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+        const cwd = std.posix.getcwd(&cwd_buf) catch |err| {
             log.print("pwd: {s}", .{@errorName(err)}) catch {};
             return exitOr(1, in_parent);
         };
         var stdout_writer = std.fs.File.stdout().writer(&.{});
         stdout_writer.interface.writeAll(cwd) catch |err| {
+            log.print("pwd: {s}", .{@errorName(err)}) catch {};
+            return exitOr(1, in_parent);
+        };
+        stdout_writer.interface.writeAll("\n") catch |err| {
             log.print("pwd: {s}", .{@errorName(err)}) catch {};
             return exitOr(1, in_parent);
         };
@@ -146,9 +150,18 @@ pub fn main() !void {
     const argv0 = if (argv.len > 0) argv[0] else "";
 
     isocline.setHistory(null, -1);
-    isocline.setPromptMarker("> ", ". ");
+    isocline.setPromptMarker("[white]>[/white] ", "[gray].[/gray] ");
+    isocline.styleDef("ic-prompt", "yellow");
 
-    while (isocline.readline("demo")) |line| {
+    var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+    var cwd = std.posix.getcwd(&cwd_buf) catch "";
+    var cwdz = alloc.dupeZ(u8, cwd) catch |err| {
+        stderr.print("{s}: {s}", .{ argv0, @errorName(err) }) catch {};
+        std.posix.exit(128 + @as(comptime_int, @intFromEnum(std.posix.E.NOMEM)));
+    };
+    defer alloc.free(cwdz);
+
+    while (isocline.readline(cwdz)) |line| {
         const input = std.mem.span(line);
         if (std.mem.trim(u8, input, &std.ascii.whitespace).len == 0) continue;
 
@@ -168,5 +181,12 @@ pub fn main() !void {
                 stderr.print("{s}\n", .{@errorName(err)}) catch {};
             };
         }
+
+        cwd = std.posix.getcwd(&cwd_buf) catch "";
+        alloc.free(cwdz);
+        cwdz = alloc.dupeZ(u8, cwd) catch |err| {
+            stderr.print("{s}: {s}", .{ argv0, @errorName(err) }) catch {};
+            std.posix.exit(128 + @as(comptime_int, @intFromEnum(std.posix.E.NOMEM)));
+        };
     }
 }
