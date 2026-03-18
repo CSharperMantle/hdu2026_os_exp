@@ -41,6 +41,55 @@ fn exec(alloc: std.mem.Allocator, command: cmd.Command, prev_read: ?std.posix.fd
     return std.posix.execvpeZ(argv_z[0].?, argv_z.ptr, std.c.environ);
 }
 
+fn isBuiltin(argv0: []const u8) bool {
+    return std.mem.eql(u8, argv0, "cd") or std.mem.eql(u8, argv0, "pwd") or std.mem.eql(u8, argv0, "exit");
+}
+
+fn exitOr(status: u8, no_exit: bool) u8 {
+    if (no_exit) {
+        return status;
+    } else {
+        std.posix.exit(status);
+    }
+}
+
+fn execBuiltin(log: *std.io.Writer, command: *const cmd.Command, in_parent: bool) u8 {
+    const name = command.argv.items[0];
+
+    if (std.mem.eql(u8, name, "cd")) {
+        const env_home = std.posix.getenv("HOME") orelse ".";
+        const target = if (command.argv.items.len > 1)
+            command.argv.items[1]
+        else
+            std.mem.span(@as([*:0]const u8, env_home));
+        std.posix.chdir(target) catch |err| {
+            log.print("cd: {s}: {s}\n", .{ target, @errorName(err) }) catch {};
+            return exitOr(1, in_parent);
+        };
+        return exitOr(0, in_parent);
+    } else if (std.mem.eql(u8, name, "pwd")) {
+        var buf: [std.posix.PATH_MAX]u8 = undefined;
+        const cwd = std.posix.getcwd(&buf) catch |err| {
+            log.print("pwd: {s}", .{@errorName(err)}) catch {};
+            return exitOr(1, in_parent);
+        };
+        var stdout_writer = std.fs.File.stdout().writer(&.{});
+        stdout_writer.interface.writeAll(cwd) catch |err| {
+            log.print("pwd: {s}", .{@errorName(err)}) catch {};
+            return exitOr(1, in_parent);
+        };
+        return exitOr(0, in_parent);
+    } else if (std.mem.eql(u8, name, "exit")) {
+        const code: u8 = if (command.argv.items.len == 2)
+            std.fmt.parseUnsigned(u8, command.argv.items[1], 10) catch 0
+        else
+            0;
+        std.posix.exit(code);
+    } else {
+        @panic("Unknown builtin");
+    }
+}
+
 fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *const cmd.Pipeline) !void {
     if (pipeline.commands.items.len == 0) return;
 
@@ -59,10 +108,14 @@ fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *con
 
         const pid = try std.posix.fork();
         if (pid == 0) {
-            exec(alloc, command, prev_read, pipefd) catch |err| {
-                log.print("{s}: {s}\n", .{ argv0, @errorName(err) }) catch {};
-                std.posix.exit(127);
-            };
+            if (isBuiltin(argv0)) {
+                _ = execBuiltin(log, &command, false);
+            } else {
+                exec(alloc, command, prev_read, pipefd) catch |err| {
+                    log.print("{s}: {s}\n", .{ argv0, @errorName(err) }) catch {};
+                    std.posix.exit(127);
+                };
+            }
             unreachable;
         }
         pids[idx] = pid;
@@ -108,8 +161,12 @@ pub fn main() !void {
         };
         defer pipeline.deinit(alloc);
 
-        executePipeline(alloc, stderr, &pipeline) catch |err| {
-            stderr.print("{s}\n", .{@errorName(err)}) catch {};
-        };
+        if (pipeline.commands.items.len == 1 and pipeline.commands.items[0].argv.items.len >= 1 and isBuiltin(pipeline.commands.items[0].argv.items[0])) {
+            _ = execBuiltin(stderr, &pipeline.commands.items[0], true);
+        } else {
+            executePipeline(alloc, stderr, &pipeline) catch |err| {
+                stderr.print("{s}\n", .{@errorName(err)}) catch {};
+            };
+        }
     }
 }
