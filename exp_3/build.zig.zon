@@ -6,6 +6,10 @@
             .url = "git+https://github.com/ratakor/isocline-zig.git#4441805bc1ca663b2b6fa7b62e2552e96449538b",
             .hash = "isocline-1.0.9-5daVr0kMBgCh-hYzMeXDNsF_imdzgPk5qua7OMBdiXHl",
         },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.11.0.tar.gz",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+        },
     },
     .paths = .{""},
     .fingerprint = 0xef79cf8e081ce4e3,

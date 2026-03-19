@@ -147,6 +147,7 @@ pub fn main() !void {
     const stderr: *std.io.Writer = &stderr_writer.interface;
 
     const argv = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, argv);
     const argv0 = if (argv.len > 0) argv[0] else "";
 
     isocline.setHistory(null, -1);

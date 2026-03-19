@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const clap = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const myshell_exe = b.addExecutable(.{
         .name = "myshell",
@@ -35,6 +39,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    mychat_exe.root_module.addImport("clap", clap.module("clap"));
     mychat_exe.linkLibC();
 
     b.installArtifact(mychat_exe);
