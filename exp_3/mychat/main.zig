@@ -1,6 +1,12 @@
 const std = @import("std");
 const clap = @import("clap");
 
+const fifo = @import("fifo.zig");
+const mq = @import("mq.zig");
+const shmem = @import("shmem.zig");
+
+const Mode = enum { fifo, mq, shmem };
+
 pub fn main() !void {
     const alloc = std.heap.page_allocator;
 
@@ -8,7 +14,7 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, gpa);
 
     const params = comptime clap.parseParamsComptime(
-        \\-h, --help                Display this help and exit.
+        \\-h,--help                 Display this help and exit.
         \\-H,--host                 Run as host. Cannot be used with '--client'.
         \\-C,--client <str>         Run as client and connect to the host. Cannot be used with '--host'.
         \\-m,--mode <str>           Connection mode. One of 'fifo', 'mq', and 'shmem'.
@@ -30,4 +36,14 @@ pub fn main() !void {
     if (res.args.help != 0) {
         return clap.helpToFile(.stderr(), clap.Help, &params, .{});
     }
+    if (res.args.host == 0 and res.args.client == null) {
+        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
+    }
+    const mode_str = res.args.mode orelse {
+        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
+    };
+    const mode = std.meta.stringToEnum(Mode, mode_str) orelse {
+        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
+    };
+    std.debug.print("{}\n", .{mode});
 }
