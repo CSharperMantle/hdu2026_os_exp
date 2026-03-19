@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const exe = b.addExecutable(.{
+    const myshell_exe = b.addExecutable(.{
         .name = "myshell",
         .root_module = b.createModule(.{
             .root_source_file = b.path("myshell/main.zig"),
@@ -17,13 +17,30 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe.root_module.addImport("isocline", isocline.module("isocline"));
-    exe.linkLibC();
+    myshell_exe.root_module.addImport("isocline", isocline.module("isocline"));
+    myshell_exe.linkLibC();
 
-    b.installArtifact(exe);
+    b.installArtifact(myshell_exe);
 
-    const run_exe = b.addRunArtifact(exe);
+    const run_myshell_exe = b.addRunArtifact(myshell_exe);
 
-    const run_step = b.step("run", "Run the application");
-    run_step.dependOn(&run_exe.step);
+    const run_step = b.step("run-myshell", "Run myshell");
+    run_step.dependOn(&run_myshell_exe.step);
+
+    const mychat_exe = b.addExecutable(.{
+        .name = "mychat",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("mychat/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    mychat_exe.linkLibC();
+
+    b.installArtifact(mychat_exe);
+
+    const run_mychat_exe = b.addRunArtifact(mychat_exe);
+
+    const run_mychat_step = b.step("run-mychat", "Run mychat");
+    run_mychat_step.dependOn(&run_mychat_exe.step);
 }
