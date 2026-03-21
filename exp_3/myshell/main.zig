@@ -146,7 +146,7 @@ fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *con
 }
 
 pub fn main() !void {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.c_allocator;
 
     var stderr_writer = std.fs.File.stdout().writer(&.{});
     const stderr: *std.io.Writer = &stderr_writer.interface;
