@@ -32,13 +32,18 @@ fn exec(alloc: std.mem.Allocator, command: cmd.Command, prev_read: ?std.posix.fd
         },
     };
 
-    const argv_z = try alloc.allocSentinel(?[*:0]const u8, command.argv.items.len, null);
-    defer alloc.free(argv_z);
+    const argvz = try alloc.allocSentinel(?[*:0]const u8, command.argv.items.len, null);
+    defer alloc.free(argvz);
+    defer {
+        for (argvz[0..command.argv.items.len]) |arg_z| {
+            alloc.free(std.mem.span(arg_z.?));
+        }
+    }
     for (command.argv.items, 0..) |arg, i| {
-        argv_z[i] = (try alloc.dupeZ(u8, arg)).ptr;
+        argvz[i] = (try alloc.dupeZ(u8, arg)).ptr;
     }
 
-    return std.posix.execvpeZ(argv_z[0].?, argv_z.ptr, std.c.environ);
+    return std.posix.execvpeZ(argvz[0].?, argvz.ptr, std.c.environ);
 }
 
 fn isBuiltin(argv0: []const u8) bool {
@@ -163,6 +168,8 @@ pub fn main() !void {
     defer alloc.free(cwdz);
 
     while (isocline.readline(cwdz)) |line| {
+        defer isocline.free(line);
+
         const input = std.mem.span(line);
         if (std.mem.trim(u8, input, &std.ascii.whitespace).len == 0) continue;
 
