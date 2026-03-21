@@ -5,10 +5,16 @@ const fifo = @import("fifo.zig");
 const mq = @import("mq.zig");
 const shmem = @import("shmem.zig");
 
+const MAX_NAME_LEN: comptime_int = 32;
+
 const Mode = enum { fifo, mq, shmem };
 
+fn printHelp(params: anytype) !void {
+    return clap.helpToFile(.stderr(), clap.Help, params, .{});
+}
+
 pub fn main() !void {
-    const alloc = std.heap.page_allocator;
+    const alloc = std.heap.c_allocator;
 
     const gpa = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, gpa);
@@ -33,17 +39,33 @@ pub fn main() !void {
     };
     defer res.deinit();
 
-    if (res.args.help != 0) {
-        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
-    }
-    if (res.args.host == 0 and res.args.client == null) {
-        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
-    }
+    if (res.args.help != 0) return printHelp(&params);
+    if (res.args.host != 0 and res.args.client != null) return printHelp(&params);
+    if (res.args.host == 0 and res.args.client == null) return printHelp(&params);
+
     const mode_str = res.args.mode orelse {
-        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
+        return printHelp(&params);
     };
     const mode = std.meta.stringToEnum(Mode, mode_str) orelse {
-        return clap.helpToFile(.stderr(), clap.Help, &params, .{});
+        return printHelp(&params);
     };
-    std.debug.print("{}\n", .{mode});
+
+    const default_name = try std.fmt.allocPrint(alloc, "user-{d}", .{std.os.linux.getpid()});
+    defer alloc.free(default_name);
+    const name = res.args.name orelse default_name;
+    if (name.len > MAX_NAME_LEN) return error.NameTooLong;
+
+    if (res.args.host != 0) {
+        switch (mode) {
+            .fifo => try fifo.runHost(alloc, name),
+            .mq => try mq.runHost(alloc, name),
+            .shmem => try shmem.runHost(alloc, name),
+        }
+    } else {
+        switch (mode) {
+            .fifo => try fifo.runClient(alloc, res.args.client.?, name),
+            .mq => try mq.runClient(alloc, res.args.client.?, name),
+            .shmem => try shmem.runClient(alloc, res.args.client.?, name),
+        }
+    }
 }
