@@ -35,35 +35,35 @@ pub const Command = struct {
     // A list of redirections to apply before executing the command. The order matters.
     redirs: std.ArrayList(Redir),
 
-    pub fn init(allocator: std.mem.Allocator) Command {
-        _ = allocator;
+    pub fn init(alloc: std.mem.Allocator) Command {
+        _ = alloc;
         return .{
             .argv = .empty,
             .redirs = .empty,
         };
     }
 
-    pub fn deinit(self: *Command, allocator: std.mem.Allocator) void {
-        for (self.argv.items) |word| allocator.free(word);
+    pub fn deinit(self: *Command, alloc: std.mem.Allocator) void {
+        for (self.argv.items) |word| alloc.free(word);
         for (self.redirs.items) |redir| switch (redir) {
-            .file => |file| allocator.free(file.target),
+            .file => |file| alloc.free(file.target),
             .dup2 => {},
         };
-        self.argv.deinit(allocator);
-        self.redirs.deinit(allocator);
+        self.argv.deinit(alloc);
+        self.redirs.deinit(alloc);
     }
 };
 
 pub const Pipeline = struct {
     commands: std.ArrayList(Command),
 
-    pub fn init(allocator: std.mem.Allocator) Pipeline {
-        _ = allocator;
+    pub fn init(alloc: std.mem.Allocator) Pipeline {
+        _ = alloc;
         return .{ .commands = .empty };
     }
 
-    pub fn deinit(self: *Pipeline, allocator: std.mem.Allocator) void {
-        for (self.commands.items) |*command| command.deinit(allocator);
-        self.commands.deinit(allocator);
+    pub fn deinit(self: *Pipeline, alloc: std.mem.Allocator) void {
+        for (self.commands.items) |*command| command.deinit(alloc);
+        self.commands.deinit(alloc);
     }
 };

@@ -46,9 +46,9 @@ fn parseFdToken(line: []const u8, start: usize) ?struct { fd: u32, end: usize } 
 }
 
 /// Parses a generic word, handling quotes.
-fn parseWord(allocator: std.mem.Allocator, line: []const u8, index: *usize) ParseResultError![]u8 {
+fn allocParseWord(alloc: std.mem.Allocator, line: []const u8, index: *usize) ParseResultError![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
+    errdefer out.deinit(alloc);
 
     const QuoteState = enum { none, single, double };
     var quote: QuoteState = .none;
@@ -60,30 +60,30 @@ fn parseWord(allocator: std.mem.Allocator, line: []const u8, index: *usize) Pars
                 ' ', '\t', '\n', '\r', '|', '<', '>' => break,
                 '\'' => quote = .single,
                 '"' => quote = .double,
-                else => try out.append(allocator, ch),
+                else => try out.append(alloc, ch),
             },
             .single => switch (ch) {
                 '\'' => quote = .none,
-                else => try out.append(allocator, ch),
+                else => try out.append(alloc, ch),
             },
             .double => switch (ch) {
                 '"' => quote = .none,
-                else => try out.append(allocator, ch),
+                else => try out.append(alloc, ch),
             },
         }
     }
 
     if (quote != .none) return error.UnterminatedQuote;
     if (out.items.len == 0) return error.UnexpectedRedirection;
-    return out.toOwnedSlice(allocator);
+    return out.toOwnedSlice(alloc);
 }
 
-pub fn parse(allocator: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipeline {
-    var pipeline = cmd.Pipeline.init(allocator);
-    errdefer pipeline.deinit(allocator);
+pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipeline {
+    var pipeline = cmd.Pipeline.init(alloc);
+    errdefer pipeline.deinit(alloc);
 
-    var current = cmd.Command.init(allocator);
-    errdefer current.deinit(allocator);
+    var current = cmd.Command.init(alloc);
+    errdefer current.deinit(alloc);
 
     var i: usize = 0;
     var pending_redir: ?struct { fd: u32, kind: cmd.RedirFileType } = null;
@@ -94,8 +94,8 @@ pub fn parse(allocator: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipe
 
         // Finalize a pending redirection.
         if (pending_redir != null) {
-            const target = try parseWord(allocator, line, &i);
-            try current.redirs.append(allocator, .{ .file = .{
+            const target = try allocParseWord(alloc, line, &i);
+            try current.redirs.append(alloc, .{ .file = .{
                 .type = pending_redir.?.kind,
                 .fd = pending_redir.?.fd,
                 .target = target,
@@ -107,8 +107,8 @@ pub fn parse(allocator: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipe
         // Handle pipes.
         if (line[i] == '|') {
             if (current.argv.items.len == 0) return error.EmptyCommand;
-            try pipeline.commands.append(allocator, current);
-            current = cmd.Command.init(allocator);
+            try pipeline.commands.append(alloc, current);
+            current = cmd.Command.init(alloc);
             i += 1;
             continue;
         }
@@ -121,7 +121,7 @@ pub fn parse(allocator: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipe
                 const dst_fd = parseFdToken(line, redir_start + 2) orelse {
                     return error.UnexpectedRedirection;
                 };
-                try current.redirs.append(allocator, .{
+                try current.redirs.append(alloc, .{
                     .dup2 = .{
                         .src_fd = maybe_src_fd.fd orelse 1, // `>&2` -> `1>&2`
                         .dst_fd = dst_fd.fd,
@@ -151,16 +151,16 @@ pub fn parse(allocator: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipe
             }
         }
         // Regular word.
-        const word = try parseWord(allocator, line, &i);
-        try current.argv.append(allocator, word);
+        const word = try allocParseWord(alloc, line, &i);
+        try current.argv.append(alloc, word);
     }
 
     if (pending_redir != null) return error.MissingRedirectionTarget;
     if (current.argv.items.len != 0 or current.redirs.items.len != 0) {
         if (current.argv.items.len == 0) return error.EmptyCommand;
-        try pipeline.commands.append(allocator, current);
+        try pipeline.commands.append(alloc, current);
     } else {
-        current.deinit(allocator);
+        current.deinit(alloc);
     }
 
     return pipeline;

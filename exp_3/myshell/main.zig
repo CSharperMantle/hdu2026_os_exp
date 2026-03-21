@@ -169,7 +169,7 @@ pub fn main() !void {
         const owned = try alloc.dupe(u8, input);
         defer alloc.free(owned);
 
-        var pipeline = parse.parse(alloc, owned) catch |err| {
+        var pipeline = parse.allocParse(alloc, owned) catch |err| {
             stderr.print("{s}: Syntax error: {s}\n", .{ argv0, @errorName(err) }) catch {};
             continue;
         };
