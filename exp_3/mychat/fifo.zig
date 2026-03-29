@@ -44,6 +44,8 @@ const Client = struct {
 };
 
 const RecvCtx = struct {
+    alloc: std.mem.Allocator,
+    my_name: []const u8,
     recv: std.fs.File,
 };
 
@@ -106,7 +108,13 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             var old_value = old_client.value;
             old_value.deinit();
         }
-        std.log.info("Joined: {s}", .{name});
+
+        const name_ = try common.allocColorizeUsername(alloc, name);
+        defer alloc.free(name_);
+        const tag = try common.allocColorizeMetaTag(alloc, "Joined:");
+        defer alloc.free(tag);
+
+        std.log.info("{s} {s}", .{ tag, name_ });
         const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
         defer alloc.free(bcast_msg);
         broadcast(clients, bcast_msg);
@@ -114,7 +122,10 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         const name = iter.next() orelse return error.MalformedFrame;
         const msg = iter.next() orelse return error.MalformedFrame;
         if (clients.getEntry(name) != null) {
-            std.log.info("[{s}] {s}", .{ name, msg });
+            const name_ = try common.allocColorizeUsername(alloc, name);
+            defer alloc.free(name_);
+
+            std.log.info("[{s}] {s}", .{ name_, msg });
             const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
             defer alloc.free(bcast_msg);
             broadcast(clients, bcast_msg);
@@ -124,7 +135,12 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
     } else if (std.mem.eql(u8, kind, "LEAVE")) {
         const name = iter.next() orelse return error.MalformedFrame;
         if (clients.fetchRemove(name)) |client| {
-            std.log.info("Left: {s}", .{name});
+            const name_ = try common.allocColorizeUsername(alloc, name);
+            defer alloc.free(name_);
+            const tag = try common.allocColorizeMetaTag(alloc, "Left:");
+            defer alloc.free(tag);
+
+            std.log.info("{s} {s}", .{ tag, name_ });
             alloc.free(client.key);
             var value = client.value;
             value.deinit();
@@ -232,7 +248,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     }
 }
 
-fn clientHandleFrame(frame: []const u8) !void {
+fn clientHandleFrame(alloc: std.mem.Allocator, my_name: []const u8, frame: []const u8) !void {
     var iter = std.mem.splitScalar(u8, frame, common.US);
 
     const kind = iter.next() orelse return error.MalformedFrame;
@@ -240,14 +256,32 @@ fn clientHandleFrame(frame: []const u8) !void {
         const name = iter.next() orelse return error.MalformedFrame;
         // data_fifo
         _ = iter.next() orelse return error.MalformedFrame;
-        std.log.info("Joined: {s}", .{name});
+
+        const name_ = try common.allocColorizeUsername(alloc, name);
+        defer alloc.free(name_);
+        const tag = try common.allocColorizeMetaTag(alloc, "Joined:");
+        defer alloc.free(tag);
+
+        std.log.info("{s} {s}", .{ tag, name_ });
     } else if (std.mem.eql(u8, kind, "MSG")) {
         const name = iter.next() orelse return error.MalformedFrame;
         const msg = iter.next() orelse return error.MalformedFrame;
-        std.log.info("[{s}] {s}", .{ name, msg });
+
+        const me_suffix = if (std.mem.eql(u8, name, my_name)) " (me)" else "";
+
+        const name_ = try common.allocColorizeUsername(alloc, name);
+        defer alloc.free(name_);
+
+        std.log.info("[{s}{s}] {s}", .{ name_, me_suffix, msg });
     } else if (std.mem.eql(u8, kind, "LEAVE")) {
         const name = iter.next() orelse return error.MalformedFrame;
-        std.log.info("Left: {s}", .{name});
+
+        const name_ = try common.allocColorizeUsername(alloc, name);
+        defer alloc.free(name_);
+        const tag = try common.allocColorizeMetaTag(alloc, "Left:");
+        defer alloc.free(tag);
+
+        std.log.info("{s} {s}", .{ tag, name_ });
     }
     if (iter.next() != null) {
         return error.MalformedFrame;
@@ -263,7 +297,7 @@ fn clientRecvLoop(ctx: RecvCtx) void {
     while (recv_reader.interface.takeDelimiter(common.RS)) |maybe_frame| {
         const frame = maybe_frame orelse continue;
         if (frame.len == 0) continue;
-        clientHandleFrame(frame) catch |err| {
+        clientHandleFrame(ctx.alloc, ctx.my_name, frame) catch |err| {
             std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
         };
     } else |_| return;
@@ -289,8 +323,13 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
     try sendJoin(alloc, ctrl_fifo_path, name, data_fifo_path);
     joined = true;
 
+    const my_name = try alloc.dupe(u8, name);
     const recv = try std.fs.openFileAbsolute(data_fifo_path, .{ .mode = .read_only });
-    const recv_thread = try std.Thread.spawn(.{}, clientRecvLoop, .{RecvCtx{ .recv = recv }});
+    const recv_thread = try std.Thread.spawn(.{}, clientRecvLoop, .{RecvCtx{
+        .alloc = alloc,
+        .my_name = my_name,
+        .recv = recv,
+    }});
     defer recv_thread.detach();
 
     const stdin = std.fs.File.stdin();
