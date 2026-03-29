@@ -1,6 +1,9 @@
 /exp_*/*.pdf
 .zig-cache/
 .tmp*
+.gdb_history
+.claude/
+CLAUDE.local.md
 
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,rust,rust-analyzer,zig
 # Edit at https://www.toptal.com/developers/gitignore?templates=visualstudiocode,rust,rust-analyzer,zig
