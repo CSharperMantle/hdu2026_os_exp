@@ -3,6 +3,28 @@ const std = @import("std");
 const common = @import("common.zig");
 
 const FIFO_PERM: comptime_int = 0o600;
+const CHECK_SIGINT_INTERVAL: comptime_int = 100;
+
+const SigIntCtx = struct {
+    flag: std.atomic.Value(bool),
+};
+
+var g_sigint_ctx: ?*SigIntCtx = null;
+
+fn sigintHandler(_: i32, _: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
+    if (g_sigint_ctx) |ctx| {
+        ctx.flag.store(true, .monotonic);
+    }
+}
+
+fn attachSigintHandler() void {
+    var act = std.posix.Sigaction{
+        .handler = .{ .sigaction = &sigintHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.SIGINFO,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+}
 
 const Client = struct {
     const Self = @This();
@@ -175,6 +197,12 @@ fn clientRecvLoop(ctx: RecvCtx) void {
 }
 
 pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []const u8) !void {
+    // Set a global flag when receiving SIGINT for shutdown
+    var sigint_ctx = SigIntCtx{ .flag = std.atomic.Value(bool).init(false) };
+    g_sigint_ctx = &sigint_ctx;
+    defer g_sigint_ctx = null;
+    attachSigintHandler();
+
     const data_fifo_path = try allocPrintFifoPath(alloc, "client");
     defer alloc.free(data_fifo_path);
     std.log.debug("Data FIFO: {s}", .{data_fifo_path});
@@ -196,7 +224,15 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
     var stdin_reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buf);
     var stdin_io_reader = &stdin_reader.interface;
-    while (try stdin_io_reader.takeDelimiter('\n')) |line| {
+    while (!sigint_ctx.flag.load(.monotonic)) {
+        // Stdin has data?
+        var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
+        if (ready == 0) continue; // timeout, check if interrupted.
+        if (fds[0].revents & std.posix.POLL.IN == 0) continue;
+
+        const maybe_line = stdin_io_reader.takeDelimiter('\n') catch break;
+        const line = maybe_line orelse continue;
         if (line.len == 0) continue;
         try sendMsg(alloc, ctrl_fifo_path, name, line);
     }
