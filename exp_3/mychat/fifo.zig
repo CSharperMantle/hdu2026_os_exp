@@ -172,7 +172,7 @@ fn testFifoWritable(path: []const u8) bool {
 
 // Probe and reap newly-found zombies.
 fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
-    var zombies = std.ArrayList([]u8){};
+    var zombies = std.ArrayList([]u8).empty;
     defer {
         for (zombies.items) |name| alloc.free(name);
         zombies.deinit(alloc);
@@ -232,17 +232,40 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     }
 }
 
+fn clientHandleFrame(frame: []const u8) !void {
+    var iter = std.mem.splitScalar(u8, frame, common.US);
+
+    const kind = iter.next() orelse return error.MalformedFrame;
+    if (std.mem.eql(u8, kind, "JOIN")) {
+        const name = iter.next() orelse return error.MalformedFrame;
+        // data_fifo
+        _ = iter.next() orelse return error.MalformedFrame;
+        std.log.info("Joined: {s}", .{name});
+    } else if (std.mem.eql(u8, kind, "MSG")) {
+        const name = iter.next() orelse return error.MalformedFrame;
+        const msg = iter.next() orelse return error.MalformedFrame;
+        std.log.info("[{s}] {s}", .{ name, msg });
+    } else if (std.mem.eql(u8, kind, "LEAVE")) {
+        const name = iter.next() orelse return error.MalformedFrame;
+        std.log.info("Left: {s}", .{name});
+    }
+    if (iter.next() != null) {
+        return error.MalformedFrame;
+    }
+}
+
 fn clientRecvLoop(ctx: RecvCtx) void {
     const recv = ctx.recv;
     defer recv.close();
 
     var reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var recv_reader = recv.reader(&reader_buf);
-    const recv_io_reader = &recv_reader.interface;
-    while (recv_io_reader.takeDelimiter(common.RS)) |maybe_line| {
-        const line = maybe_line orelse continue;
-        if (line.len == 0) continue;
-        std.log.info("{s}", .{line});
+    while (recv_reader.interface.takeDelimiter(common.RS)) |maybe_frame| {
+        const frame = maybe_frame orelse continue;
+        if (frame.len == 0) continue;
+        clientHandleFrame(frame) catch |err| {
+            std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
+        };
     } else |_| return;
 }
 
