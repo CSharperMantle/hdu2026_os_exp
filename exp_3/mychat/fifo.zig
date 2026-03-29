@@ -4,6 +4,7 @@ const common = @import("common.zig");
 
 const FIFO_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
+const ZOMBIE_CHECK_INTERVAL_MS: i32 = 500;
 
 const SigIntCtx = struct {
     flag: std.atomic.Value(bool),
@@ -108,7 +109,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         std.log.info("Joined: {s}", .{name});
         const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
         defer alloc.free(bcast_msg);
-        broadcastIgnorant(clients, bcast_msg);
+        broadcast(clients, bcast_msg);
     } else if (std.mem.eql(u8, kind, "MSG")) {
         const name = iter.next() orelse return error.MalformedFrame;
         const msg = iter.next() orelse return error.MalformedFrame;
@@ -116,7 +117,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             std.log.info("[{s}] {s}", .{ name, msg });
             const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
             defer alloc.free(bcast_msg);
-            broadcastIgnorant(clients, bcast_msg);
+            broadcast(clients, bcast_msg);
         } else {
             std.log.warn("Message from unregistered client: {s}", .{name});
         }
@@ -129,7 +130,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             value.deinit();
             const bcast_msg = try common.allocLeaveFrame(alloc, name);
             defer alloc.free(bcast_msg);
-            broadcastIgnorant(clients, bcast_msg);
+            broadcast(clients, bcast_msg);
         } else {
             std.log.warn("Received LEAVE for non-existent client: {s}", .{name});
         }
@@ -139,38 +140,52 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
     }
 }
 
+fn reapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), zombies: *const std.ArrayList([]u8)) void {
+    for (zombies.items) |name| {
+        if (clients.fetchRemove(name)) |zombie| {
+            std.log.warn("Reaped zombie client: {s} @ {s}", .{ zombie.key, zombie.value.data_fifo });
+            alloc.free(zombie.key);
+            var value = zombie.value;
+            value.deinit();
+        }
+    }
+    for (zombies.items) |name| {
+        const msg = common.allocLeaveFrame(alloc, name) catch continue;
+        defer alloc.free(msg);
+        broadcast(clients, msg);
+    }
+}
+
 // Don't try to find zombies.
-fn broadcastIgnorant(clients: *const std.StringHashMap(Client), buffer: []const u8) void {
+fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) void {
     var iter = clients.valueIterator();
     while (iter.next()) |client| {
         writeToPath(client.data_fifo, buffer) catch {};
     }
 }
 
-// Broadcast and reap newly-found zombies.
-fn broadcast(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), buffer: []const u8) !void {
+fn testFifoWritable(path: []const u8) bool {
+    const fd = std.posix.open(path, std.posix.O{ .ACCMODE = .WRONLY, .NONBLOCK = true }, 0) catch return false;
+    std.posix.close(fd);
+    return true;
+}
+
+// Probe and reap newly-found zombies.
+fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
     var zombies = std.ArrayList([]u8){};
     defer {
         for (zombies.items) |name| alloc.free(name);
         zombies.deinit(alloc);
     }
-
     var iter = clients.iterator();
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
         const data_fifo = entry.value_ptr.data_fifo;
-        writeToPath(data_fifo, buffer) catch try zombies.append(alloc, try alloc.dupe(u8, name));
-    }
-
-    // Reap zombies.
-    for (zombies.items) |name| {
-        if (clients.remove(name)) {
-            std.log.warn("Reaped zombie client: {s}", .{name});
+        if (!testFifoWritable(data_fifo)) {
+            try zombies.append(alloc, try alloc.dupe(u8, name));
         }
-        const msg = common.allocLeaveFrame(alloc, name) catch continue;
-        defer alloc.free(msg);
-        broadcastIgnorant(clients, msg);
     }
+    reapZombies(alloc, clients, &zombies);
 }
 
 pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
@@ -193,17 +208,27 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
 
     const ctrl_fifo = try std.fs.openFileAbsolute(ctrl_fifo_path, .{ .mode = .read_only });
     defer ctrl_fifo.close();
+    const ctrl_fifo_fd = ctrl_fifo.handle;
 
     var reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var ctrl_fifo_reader = ctrl_fifo.reader(&reader_buf);
-    const ctrl_fifo_io_reader = &ctrl_fifo_reader.interface;
+
     while (true) {
-        const frame = try ctrl_fifo_io_reader.takeDelimiter(common.RS) orelse continue;
-        if (frame.len == 0) continue;
-        hostHandleFrame(alloc, &clients, frame) catch |err| {
-            std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
-            continue;
+        // Poll ctrl FIFO, process data if there's any, otherwise probe for zombies
+        var fds = [_]std.posix.pollfd{.{ .fd = ctrl_fifo_fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        const ready = std.posix.poll(&fds, ZOMBIE_CHECK_INTERVAL_MS) catch |err| {
+            std.log.err("Poll on ctrl FIFO failed: {}", .{err});
+            break;
         };
+        if (ready > 0 and (fds[0].revents & std.posix.POLL.IN != 0)) {
+            const frame = ctrl_fifo_reader.interface.takeDelimiter(common.RS) catch break orelse continue;
+            if (frame.len == 0) continue;
+            hostHandleFrame(alloc, &clients, frame) catch |err| {
+                std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
+            };
+        } else {
+            try probeZombies(alloc, &clients);
+        }
     }
 }
 
@@ -248,7 +273,6 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
     const stdin = std.fs.File.stdin();
     var stdin_reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buf);
-    var stdin_io_reader = &stdin_reader.interface;
     while (!sigint_ctx.flag.load(.monotonic)) {
         // Stdin has data?
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
@@ -256,7 +280,7 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
         if (ready == 0) continue; // timeout, check if interrupted.
         if (fds[0].revents & std.posix.POLL.IN == 0) continue;
 
-        const maybe_line = stdin_io_reader.takeDelimiter('\n') catch break;
+        const maybe_line = stdin_reader.interface.takeDelimiter('\n') catch break;
         const line = maybe_line orelse continue;
         if (line.len == 0) continue;
         try sendMsg(alloc, ctrl_fifo_path, name, line);
