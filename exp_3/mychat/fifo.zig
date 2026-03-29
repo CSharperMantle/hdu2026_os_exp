@@ -102,19 +102,19 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         errdefer alloc.free(name);
         const data_fifo = iter.next() orelse return error.MalformedFrame;
 
-        if (try clients.fetchPut(name, try Client.init(alloc, data_fifo))) |old_client| {
-            std.log.warn("Kicking off old client: {s}", .{old_client.key});
-            alloc.free(old_client.key);
-            var old_value = old_client.value;
-            old_value.deinit();
-        }
-
         const name_ = try common.allocColorizeUsername(alloc, name);
         defer alloc.free(name_);
+
+        if (clients.contains(name)) {
+            std.log.warn("Duplicated joining request for {s}, ignoring", .{name_});
+            return;
+        }
+        try clients.put(name, try Client.init(alloc, data_fifo));
+
         const tag = try common.allocColorizeMetaTag(alloc, "Joined:");
         defer alloc.free(tag);
-
         std.log.info("{s} {s}", .{ tag, name_ });
+
         const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
         defer alloc.free(bcast_msg);
         broadcast(clients, bcast_msg);
@@ -124,8 +124,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         if (clients.getEntry(name) != null) {
             const name_ = try common.allocColorizeUsername(alloc, name);
             defer alloc.free(name_);
-
             std.log.info("[{s}] {s}", .{ name_, msg });
+
             const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
             defer alloc.free(bcast_msg);
             broadcast(clients, bcast_msg);
@@ -139,8 +139,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             defer alloc.free(name_);
             const tag = try common.allocColorizeMetaTag(alloc, "Left:");
             defer alloc.free(tag);
-
             std.log.info("{s} {s}", .{ tag, name_ });
+
             alloc.free(client.key);
             var value = client.value;
             value.deinit();
@@ -148,7 +148,9 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             defer alloc.free(bcast_msg);
             broadcast(clients, bcast_msg);
         } else {
-            std.log.warn("Received LEAVE for non-existent client: {s}", .{name});
+            const name_ = try common.allocColorizeUsername(alloc, name);
+            defer alloc.free(name_);
+            std.log.warn("Received LEAVE for non-existent client: {s}", .{name_});
         }
     }
     if (iter.next() != null) {
@@ -159,7 +161,10 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
 fn reapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), zombies: *const std.ArrayList([]u8)) void {
     for (zombies.items) |name| {
         if (clients.fetchRemove(name)) |zombie| {
-            std.log.warn("Reaped zombie client: {s} @ {s}", .{ zombie.key, zombie.value.data_fifo });
+            const name_: ?[]u8 = common.allocColorizeUsername(alloc, zombie.key) catch null;
+            defer if (name_) |v| alloc.free(v);
+
+            std.log.warn("Reaped zombie client: {s} @ {s}", .{ name_ orelse zombie.key, zombie.value.data_fifo });
             alloc.free(zombie.key);
             var value = zombie.value;
             value.deinit();
