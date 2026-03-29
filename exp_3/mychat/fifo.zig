@@ -108,7 +108,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         std.log.info("Joined: {s}", .{name});
         const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
         defer alloc.free(bcast_msg);
-        try broadcast(clients, bcast_msg);
+        broadcastIgnorant(clients, bcast_msg);
     } else if (std.mem.eql(u8, kind, "MSG")) {
         const name = iter.next() orelse return error.MalformedFrame;
         const msg = iter.next() orelse return error.MalformedFrame;
@@ -116,7 +116,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             std.log.info("[{s}] {s}", .{ name, msg });
             const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
             defer alloc.free(bcast_msg);
-            try broadcast(clients, bcast_msg);
+            broadcastIgnorant(clients, bcast_msg);
         } else {
             std.log.warn("Message from unregistered client: {s}", .{name});
         }
@@ -129,7 +129,7 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
             value.deinit();
             const bcast_msg = try common.allocLeaveFrame(alloc, name);
             defer alloc.free(bcast_msg);
-            try broadcast(clients, bcast_msg);
+            broadcastIgnorant(clients, bcast_msg);
         } else {
             std.log.warn("Received LEAVE for non-existent client: {s}", .{name});
         }
@@ -139,13 +139,37 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
     }
 }
 
-fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) !void {
+// Don't try to find zombies.
+fn broadcastIgnorant(clients: *const std.StringHashMap(Client), buffer: []const u8) void {
     var iter = clients.valueIterator();
     while (iter.next()) |client| {
-        writeToPath(client.data_fifo, buffer) catch |err| switch (err) {
-            error.FileNotFound, error.AccessDenied => {},
-            else => return err,
-        };
+        writeToPath(client.data_fifo, buffer) catch {};
+    }
+}
+
+// Broadcast and reap newly-found zombies.
+fn broadcast(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), buffer: []const u8) !void {
+    var zombies = std.ArrayList([]u8){};
+    defer {
+        for (zombies.items) |name| alloc.free(name);
+        zombies.deinit(alloc);
+    }
+
+    var iter = clients.iterator();
+    while (iter.next()) |entry| {
+        const name = entry.key_ptr.*;
+        const data_fifo = entry.value_ptr.data_fifo;
+        writeToPath(data_fifo, buffer) catch try zombies.append(alloc, try alloc.dupe(u8, name));
+    }
+
+    // Reap zombies.
+    for (zombies.items) |name| {
+        if (clients.remove(name)) {
+            std.log.warn("Reaped zombie client: {s}", .{name});
+        }
+        const msg = common.allocLeaveFrame(alloc, name) catch continue;
+        defer alloc.free(msg);
+        broadcastIgnorant(clients, msg);
     }
 }
 
@@ -178,6 +202,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
         if (frame.len == 0) continue;
         hostHandleFrame(alloc, &clients, frame) catch |err| {
             std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
+            continue;
         };
     }
 }
