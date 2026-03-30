@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub const MAX_FRAME_LEN: comptime_int = 4096;
+// <https://tldp.org/LDP/lpg/node13.html>
+// #define _POSIX_PIPE_BUF 512
+pub const MAX_FRAME_LEN: comptime_int = 512;
 
 pub const US: comptime_int = '\x1f';
 pub const RS: comptime_int = '\x1e';
