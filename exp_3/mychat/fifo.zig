@@ -6,6 +6,8 @@ const FIFO_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
 const ZOMBIE_CHECK_INTERVAL_MS: i32 = 500;
 
+const FIFO_NAME_PATTERN = "/tmp/mychat-{s}-{d}.fifo";
+
 const SigIntCtx = struct {
     flag: std.atomic.Value(bool),
 };
@@ -89,8 +91,7 @@ fn sendLeaveBestEffort(alloc: std.mem.Allocator, fifo: []const u8, name: []const
 
 fn allocPrintFifoPath(alloc: std.mem.Allocator, role: []const u8) ![]u8 {
     const pid = std.os.linux.getpid();
-    const ts = std.time.milliTimestamp();
-    return std.fmt.allocPrint(alloc, "/tmp/mychat_{s}_{d}_{d}.fifo", .{ role, pid, ts });
+    return std.fmt.allocPrint(alloc, FIFO_NAME_PATTERN, .{ role, pid });
 }
 
 fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), frame: []const u8) !void {
