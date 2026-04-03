@@ -79,10 +79,10 @@ fn allocParseWord(alloc: std.mem.Allocator, line: []const u8, index: *usize) Par
 }
 
 pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipeline {
-    var pipeline = cmd.Pipeline.init(alloc);
+    var pipeline = cmd.Pipeline.init();
     errdefer pipeline.deinit(alloc);
 
-    var current = cmd.Command.init(alloc);
+    var current = cmd.Command.init();
     errdefer current.deinit(alloc);
 
     var i: usize = 0;
@@ -108,7 +108,7 @@ pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pip
         if (line[i] == '|') {
             if (current.argv.items.len == 0) return error.EmptyCommand;
             try pipeline.commands.append(alloc, current);
-            current = cmd.Command.init(alloc);
+            current = cmd.Command.init();
             i += 1;
             continue;
         }

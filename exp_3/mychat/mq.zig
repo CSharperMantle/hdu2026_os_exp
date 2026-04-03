@@ -361,7 +361,7 @@ fn clientRecvLoop(ctx: RecvCtx) void {
     var recv_buf: [common.MAX_FRAME_LEN]u8 = undefined;
 
     // Handle Ctrl-C
-    while (!g_sigint_ctx.flag.load(.monotonic)) {
+    while (!(g_sigint_ctx orelse unreachable).triggered.load(.monotonic)) {
         // Blocking receive
         const received = cmq.receive(ctx.mq, &recv_buf, null) catch break;
         if (received == 0) continue;

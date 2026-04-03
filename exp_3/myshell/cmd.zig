@@ -35,8 +35,7 @@ pub const Command = struct {
     // A list of redirections to apply before executing the command. The order matters.
     redirs: std.ArrayList(Redir),
 
-    pub fn init(alloc: std.mem.Allocator) Command {
-        _ = alloc;
+    pub fn init() Command {
         return .{
             .argv = .empty,
             .redirs = .empty,
@@ -57,8 +56,7 @@ pub const Command = struct {
 pub const Pipeline = struct {
     commands: std.ArrayList(Command),
 
-    pub fn init(alloc: std.mem.Allocator) Pipeline {
-        _ = alloc;
+    pub fn init() Pipeline {
         return .{ .commands = .empty };
     }
 
