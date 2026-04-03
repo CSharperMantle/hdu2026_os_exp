@@ -84,24 +84,6 @@ fn send(mq_name: []const u8, buf: []const u8) !void {
     try cmq.send(mqd, buf, 0);
 }
 
-fn sendJoin(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, client_mq_name: []const u8) !void {
-    const frame = try common.allocJoinFrame(alloc, name, client_mq_name);
-    defer alloc.free(frame);
-    try send(mq_name, frame);
-}
-
-fn sendMsg(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, msg: []const u8) !void {
-    const frame = try common.allocMsgFrame(alloc, name, msg);
-    defer alloc.free(frame);
-    try send(mq_name, frame);
-}
-
-fn sendLeaveBestEffort(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8) void {
-    const frame = common.allocLeaveFrame(alloc, name) catch return;
-    defer alloc.free(frame);
-    send(mq_name, frame) catch {};
-}
-
 // Don't try to find zombies.
 fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) void {
     var iter = clients.valueIterator();
@@ -371,6 +353,24 @@ fn clientRecvLoop(ctx: RecvCtx) void {
             std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
         };
     }
+}
+
+fn sendJoin(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, client_mq_name: []const u8) !void {
+    const frame = try common.allocJoinFrame(alloc, name, client_mq_name);
+    defer alloc.free(frame);
+    try send(mq_name, frame);
+}
+
+fn sendMsg(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, msg: []const u8) !void {
+    const frame = try common.allocMsgFrame(alloc, name, msg);
+    defer alloc.free(frame);
+    try send(mq_name, frame);
+}
+
+fn sendLeaveBestEffort(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8) void {
+    const frame = common.allocLeaveFrame(alloc, name) catch return;
+    defer alloc.free(frame);
+    send(mq_name, frame) catch {};
 }
 
 pub fn runClient(alloc: std.mem.Allocator, host_mq_name: []const u8, name: []const u8) !void {

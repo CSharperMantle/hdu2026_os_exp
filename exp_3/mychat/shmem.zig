@@ -226,7 +226,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     const fd = try cshm.create(HOST_SHM_NAME, SHM_PERM, @sizeOf(ShmRegion));
     defer {
         cshm.close(fd);
-        cshm.unlink(HOST_SHM_NAME) catch unreachable;
+        cshm.unlink(HOST_SHM_NAME) catch {};
     }
 
     const host_mmap_slice = try std.posix.mmap(
@@ -238,10 +238,8 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
         0,
     );
     defer {
-        std.posix.munmap(host_mmap_slice);
-    }
-    defer {
         cshm.unlink(HOST_SHM_NAME) catch {};
+        std.posix.munmap(host_mmap_slice);
     }
 
     const host_shm = @as(*ShmRegion, @ptrCast(host_mmap_slice.ptr));
@@ -328,6 +326,30 @@ fn clientRecvLoop(ctx: *RecvCtx) void {
     }
 }
 
+fn sendToHost(host_shm: *ShmRegion, frame: []const u8) !void {
+    try csem.wait(&host_shm.space_sem);
+    @memcpy(host_shm.frame[0..frame.len], frame);
+    try csem.post(&host_shm.data_sem);
+}
+
+fn sendJoin(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8, client_shm_name: []const u8) !void {
+    const frame = try common.allocJoinFrame(alloc, name, client_shm_name);
+    defer alloc.free(frame);
+    try sendToHost(host_shm, frame);
+}
+
+fn sendMsg(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8, msg: []const u8) !void {
+    const frame = try common.allocMsgFrame(alloc, name, msg);
+    defer alloc.free(frame);
+    try sendToHost(host_shm, frame);
+}
+
+fn sendLeaveBestEffort(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8) void {
+    const leave_frame = common.allocLeaveFrame(alloc, name) catch return;
+    defer alloc.free(leave_frame);
+    sendToHost(host_shm, leave_frame) catch {};
+}
+
 pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []const u8) !void {
     var sigint_ctx = SigIntCtx{ .triggered = std.atomic.Value(bool).init(false) };
     g_sigint_ctx = &sigint_ctx;
@@ -342,7 +364,7 @@ pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []co
     const fd = try cshm.create(client_shm_name, SHM_PERM, @sizeOf(ShmRegion));
     defer {
         cshm.close(fd);
-        cshm.unlink(client_shm_name) catch unreachable;
+        cshm.unlink(client_shm_name) catch {};
     }
 
     // Client shm for downlink
@@ -383,8 +405,6 @@ pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []co
 
     var joined = false;
     defer if (joined) sendLeaveBestEffort(alloc, host_shm, name);
-
-    // Send JOIN
     try sendJoin(alloc, host_shm, name, client_shm_name);
     joined = true;
 
@@ -415,28 +435,4 @@ pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []co
 
         sendMsg(alloc, host_shm, name, line) catch break;
     }
-}
-
-fn deliverToHost(host_shm: *ShmRegion, frame: []const u8) !void {
-    try csem.wait(&host_shm.space_sem);
-    @memcpy(host_shm.frame[0..frame.len], frame);
-    try csem.post(&host_shm.data_sem);
-}
-
-fn sendJoin(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8, client_shm_name: []const u8) !void {
-    const frame = try common.allocJoinFrame(alloc, name, client_shm_name);
-    defer alloc.free(frame);
-    try deliverToHost(host_shm, frame);
-}
-
-fn sendMsg(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8, msg: []const u8) !void {
-    const frame = try common.allocMsgFrame(alloc, name, msg);
-    defer alloc.free(frame);
-    try deliverToHost(host_shm, frame);
-}
-
-fn sendLeaveBestEffort(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []const u8) void {
-    const leave_frame = common.allocLeaveFrame(alloc, name) catch return;
-    defer alloc.free(leave_frame);
-    deliverToHost(host_shm, leave_frame) catch {};
 }

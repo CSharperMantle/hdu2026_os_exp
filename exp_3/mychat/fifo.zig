@@ -71,24 +71,6 @@ fn writeToPath(path: []const u8, buf: []const u8) !void {
     try file.writeAll(buf);
 }
 
-fn sendJoin(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8, data_fifo_path: []const u8) !void {
-    const frame = try common.allocJoinFrame(alloc, name, data_fifo_path);
-    defer alloc.free(frame);
-    try writeToPath(fifo, frame);
-}
-
-fn sendMsg(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8, msg: []const u8) !void {
-    const frame = try common.allocMsgFrame(alloc, name, msg);
-    defer alloc.free(frame);
-    try writeToPath(fifo, frame);
-}
-
-fn sendLeaveBestEffort(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8) void {
-    const frame = common.allocLeaveFrame(alloc, name) catch return;
-    defer alloc.free(frame);
-    writeToPath(fifo, frame) catch {};
-}
-
 fn allocPrintFifoPath(alloc: std.mem.Allocator, role: []const u8) ![]u8 {
     const pid = std.os.linux.getpid();
     return std.fmt.allocPrint(alloc, FIFO_NAME_PATTERN, .{ role, pid });
@@ -252,6 +234,24 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
             try probeZombies(alloc, &clients);
         }
     }
+}
+
+fn sendJoin(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8, data_fifo_path: []const u8) !void {
+    const frame = try common.allocJoinFrame(alloc, name, data_fifo_path);
+    defer alloc.free(frame);
+    try writeToPath(fifo, frame);
+}
+
+fn sendMsg(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8, msg: []const u8) !void {
+    const frame = try common.allocMsgFrame(alloc, name, msg);
+    defer alloc.free(frame);
+    try writeToPath(fifo, frame);
+}
+
+fn sendLeaveBestEffort(alloc: std.mem.Allocator, fifo: []const u8, name: []const u8) void {
+    const frame = common.allocLeaveFrame(alloc, name) catch return;
+    defer alloc.free(frame);
+    writeToPath(fifo, frame) catch {};
 }
 
 fn clientHandleFrame(alloc: std.mem.Allocator, my_name: []const u8, frame: []const u8) !void {
