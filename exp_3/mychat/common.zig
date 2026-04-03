@@ -140,3 +140,136 @@ pub const cmq = struct {
         return receiveC(mqd, msg.ptr, msg.len, msg_prio);
     }
 };
+
+// From <semaphore.h>
+
+pub const csem = struct {
+    // <bits/semaphore.h>
+    //
+    // #if __WORDSIZE == 64
+    // # define __SIZEOF_SEM_T 32
+    // #else
+    // # define __SIZEOF_SEM_T 16
+    // #endif
+    // typedef union
+    // {
+    //   char __size[__SIZEOF_SEM_T];
+    //   long int __align;
+    // } sem_t;
+    pub const sem_t = extern struct {
+        _opaque: [64]u8,
+    };
+
+    extern fn sem_init(sem: *sem_t, pshared: c_int, value: c_uint) c_int;
+    extern fn sem_destroy(sem: *sem_t) c_int;
+    extern fn sem_wait(sem: *sem_t) c_int;
+    extern fn sem_trywait(sem: *sem_t) c_int;
+    extern fn sem_timedwait(sem: *sem_t, abstime: *const std.posix.timespec) c_int;
+    extern fn sem_post(sem: *sem_t) c_int;
+
+    pub fn init(sem: *sem_t, pshared: c_int, value: c_uint) !void {
+        switch (std.posix.errno(sem_init(sem, pshared, value))) {
+            .SUCCESS => return,
+            .INVAL => return error.InvalidSemaphore,
+            .NOSYS => return error.SystemOutdated,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    pub fn destroy(sem: *sem_t) !void {
+        switch (std.posix.errno(sem_destroy(sem))) {
+            .SUCCESS => return,
+            .INVAL => return error.InvalidValue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    pub fn wait(sem: *sem_t) !void {
+        switch (std.posix.errno(sem_wait(sem))) {
+            .SUCCESS => return,
+            .INTR => return error.Interrupted,
+            .INVAL => return error.InvalidSemaphore,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    pub fn timedWait(sem: *sem_t, abstime: *const std.posix.timespec) !void {
+        switch (std.posix.errno(sem_timedwait(sem, abstime))) {
+            .SUCCESS => return,
+            .INTR => return error.Interrupted,
+            .INVAL => return error.InvalidTimespec,
+            .TIMEDOUT => return error.TimedOut,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+
+    pub fn post(sem: *sem_t) !void {
+        switch (std.posix.errno(sem_post(sem))) {
+            .SUCCESS => return,
+            .INVAL => return error.InvalidSemaphore,
+            .OVERFLOW => return error.SemValueOverflow,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+};
+
+// From <sys/mman.h> and <sys/stat.h>
+
+pub const cshm = struct {
+    extern fn shm_open(name: [*:0]const u8, oflag: c_int, mode: std.posix.mode_t) c_int;
+    extern fn shm_unlink(name: [*:0]const u8) c_int;
+
+    pub fn openZ(name: [*:0]const u8, oflag: std.posix.O, mode: std.posix.mode_t) !c_int {
+        const fd = shm_open(name, @bitCast(oflag), mode);
+        if (fd < 0) {
+            return switch (std.posix.errno(fd)) {
+                .ACCES => return error.AccessDenied,
+                .EXIST => return error.PathAlreadyExists,
+                .INVAL => return error.BadPathName,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                .NAMETOOLONG => return error.NameTooLong,
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .NOENT => return error.FileNotFound,
+                .NOMEM => return error.OutOfMemory,
+                .NOSPC => return error.NoSpaceLeft,
+                else => |err| return std.posix.unexpectedErrno(err),
+            };
+        }
+        return fd;
+    }
+
+    pub fn open(name: []const u8, oflag: std.posix.O, mode: std.posix.mode_t) !c_int {
+        const name_ = try std.posix.toPosixPath(name);
+        return openZ(&name_, oflag, mode);
+    }
+
+    pub fn create(name: []const u8, mode: std.posix.mode_t, size: usize) !c_int {
+        const fd = try open(name, .{ .CREAT = true, .EXCL = true, .ACCMODE = .RDWR }, mode);
+        errdefer {
+            std.posix.close(fd);
+            _ = shm_unlink(@as([*:0]const u8, @ptrFromInt(@intFromPtr(name.ptr))));
+        }
+        try std.posix.ftruncate(fd, size);
+        return fd;
+    }
+
+    pub fn close(fd: c_int) void {
+        std.posix.close(fd);
+    }
+
+    pub fn unlinkZ(name: [*:0]const u8) !void {
+        if (shm_unlink(name) < 0) {
+            return switch (std.posix.errno(shm_unlink(name))) {
+                .ACCES => return error.AccessDenied,
+                .NAMETOOLONG => return error.NameTooLong,
+                .NOENT => return error.FileNotFound,
+                else => |err| return std.posix.unexpectedErrno(err),
+            };
+        }
+    }
+
+    pub fn unlink(name: []const u8) !void {
+        const name_ = try std.posix.toPosixPath(name);
+        return unlinkZ(&name_);
+    }
+};
