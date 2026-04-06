@@ -52,8 +52,74 @@
 ]
 
 #paragraph([双端点对点聊天室实现])[
-  #lorem(50)
+  使用点对点拓扑实现一对一聊天，以达到任务书中使用 POSIX 共享内存实现双向通信的要求。使用读者--写者模式实现同步，两端互为对方的读者，共享同一个单缓冲；同时还需防止第三人加入对话。对话发起方首先通过 `shm_open(3)` 创建共享内存区段，初始化五个信号量：
+
+  - $#raw("client_present") = 1$，确保同一时刻最多只有一个客户端接入；
+  - $#raw("turnstile") = 1$，实现当前发送方的互斥访问；
+  - $#raw("empty") = 1$，表示缓冲区空闲；
+  - $#raw("full_host") = 0$、$#raw("full_client") = 0$，分别作为两端的接收就绪信号。
+
+  服务端与客户端使用如@code:p2p-server-send、@code:p2p-client-send、@code:p2p-server-receive、@code:p2p-client-receive 所示算法进行资源共享。
 ]
+
+#grid(
+  columns: (1fr, 1fr),
+  rows: 2,
+  align: top,
+  gutter: 1em,
+  [
+    #code(
+      ```txt
+      procedure server_send() {
+        P(turnstile)
+        P(empty)
+          [ Write data to buffer ]
+        V(full_client)
+        V(turnstile)
+      }
+      ```,
+      caption: [服务端发送函数]
+    ) <code:p2p-server-send>
+  ],
+  [
+    #code(
+      ```txt
+      procedure client_send() {
+        P(turnstile)
+        P(empty)
+          [ Write data to buffer ]
+        V(full_server)
+        V(turnstile)
+      }
+      ```,
+      caption: [客户端发送函数]
+    ) <code:p2p-client-send>
+  ],
+  [
+    #code(
+      ```txt
+      procedure server_receive() {
+        P(full_server)
+          [ Read data from buffer ]
+        V(empty)
+      }
+      ```,
+      caption: [服务端接收函数]
+    ) <code:p2p-server-receive>
+  ],
+  [
+    #code(
+      ```txt
+      procedure client_receive() {
+        P(full_client)
+          [ Read data from buffer ]
+        V(empty)
+      }
+      ```,
+      caption: [客户端接收函数]
+    ) <code:p2p-client-receive>
+  ],
+)
 
 #paragraph([功能验证])[
   分别在三种 IPC 模式下启动主机进程与多个客户端进程，观察客户端加入、消息广播、客户端退出的行为是否符合预期。对每种 IPC 机制进行故障测试，涉及客户端收到信号退出、消息过长、客户端重名等场景，以验证帧协议解析、僵尸回收、进程退出资源清理等功能的正确性。
