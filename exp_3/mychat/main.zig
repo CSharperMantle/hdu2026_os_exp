@@ -4,10 +4,11 @@ const clap = @import("clap");
 const fifo = @import("fifo.zig");
 const mq = @import("mq.zig");
 const shmem = @import("shmem.zig");
+const p2p = @import("p2p.zig");
 
 const MAX_NAME_LEN: comptime_int = 32;
 
-const Mode = enum { fifo, mq, shmem };
+const Mode = enum { fifo, mq, shmem, p2p };
 
 fn printHelp(params: anytype) !void {
     return clap.helpToFile(.stderr(), clap.Help, params, .{});
@@ -23,7 +24,7 @@ pub fn main() !void {
         \\-h,--help                 Display this help and exit.
         \\-H,--host                 Run as host. Cannot be used with '--client'.
         \\-C,--client <str>         Run as client and connect to the host. Cannot be used with '--host'.
-        \\-m,--mode <str>           Connection mode. One of 'fifo', 'mq', and 'shmem'.
+        \\-m,--mode <str>           Connection mode. One of 'fifo', 'mq', 'shmem', and 'p2p'.
         \\-n,--name <str>           [Optional] Name to use. Max length: 32.
         \\
     );
@@ -60,12 +61,14 @@ pub fn main() !void {
             .fifo => try fifo.runHost(alloc, name),
             .mq => try mq.runHost(alloc, name),
             .shmem => try shmem.runHost(alloc, name),
+            .p2p => try p2p.runHost(alloc, name),
         }
     } else {
         switch (mode) {
             .fifo => try fifo.runClient(alloc, res.args.client.?, name),
             .mq => try mq.runClient(alloc, res.args.client.?, name),
             .shmem => try shmem.runClient(alloc, res.args.client.?, name),
+            .p2p => try p2p.runClient(alloc, res.args.client.?, name),
         }
     }
 }
