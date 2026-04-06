@@ -18,16 +18,10 @@ const NEW_MQ_ATTR: cmq.mq_attr = .{
     .mq_curmsgs = 0,
 };
 
-const SigIntCtx = struct {
-    triggered: std.atomic.Value(bool),
-};
-
-var g_sigint_ctx: ?*SigIntCtx = null;
+var g_shutdown = std.atomic.Value(bool).init(false);
 
 fn sigintHandler(_: i32, _: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    if (g_sigint_ctx) |ctx| {
-        ctx.triggered.store(true, .monotonic);
-    }
+    g_shutdown.store(true, .monotonic);
 }
 
 fn attachSigintHandler() void {
@@ -268,7 +262,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
 
     var recv_buf: [common.MAX_FRAME_LEN]u8 = undefined;
 
-    while (true) {
+    while (!g_shutdown.load(.monotonic)) {
         // Blocking receive - zombie detection happens in separate thread
         const received = cmq.receive(host_mq, &recv_buf, null) catch |err| {
             std.log.err("mq_receive failed: {}", .{err});
@@ -343,7 +337,7 @@ fn clientRecvLoop(ctx: RecvCtx) void {
     var recv_buf: [common.MAX_FRAME_LEN]u8 = undefined;
 
     // Handle Ctrl-C
-    while (!(g_sigint_ctx orelse unreachable).triggered.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         // Blocking receive
         const received = cmq.receive(ctx.mq, &recv_buf, null) catch break;
         if (received == 0) continue;
@@ -375,9 +369,6 @@ fn sendLeaveBestEffort(alloc: std.mem.Allocator, mq_name: []const u8, name: []co
 
 pub fn runClient(alloc: std.mem.Allocator, host_mq_name: []const u8, name: []const u8) !void {
     // Set a global flag when receiving SIGINT for shutdown
-    var sigint_ctx = SigIntCtx{ .triggered = std.atomic.Value(bool).init(false) };
-    g_sigint_ctx = &sigint_ctx;
-    defer g_sigint_ctx = null;
     attachSigintHandler();
 
     const client_mq_name = try allocClientMqName(alloc);
@@ -414,7 +405,7 @@ pub fn runClient(alloc: std.mem.Allocator, host_mq_name: []const u8, name: []con
     const stdin = std.fs.File.stdin();
     var stdin_reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buf);
-    while (!sigint_ctx.triggered.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         // Stdin has data?
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;

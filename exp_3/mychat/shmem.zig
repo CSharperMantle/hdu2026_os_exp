@@ -21,16 +21,10 @@ const ShmRegion = extern struct {
     frame: [common.MAX_FRAME_LEN]u8,
 };
 
-const SigIntCtx = struct {
-    triggered: std.atomic.Value(bool),
-};
-
-var g_sigint_ctx: ?*SigIntCtx = null;
+var g_shutdown = std.atomic.Value(bool).init(false);
 
 fn sigintHandler(_: i32, _: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    if (g_sigint_ctx) |ctx| {
-        ctx.triggered.store(true, .monotonic);
-    }
+    g_shutdown.store(true, .monotonic);
 }
 
 fn attachSigintHandler() void {
@@ -251,7 +245,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
 
     std.log.info("Host SHM: {s}", .{HOST_SHM_NAME});
 
-    while (true) {
+    while (!g_shutdown.load(.monotonic)) {
         try csem.wait(&host_shm.data_sem);
         const rs_idx = std.mem.indexOfScalar(u8, &host_shm.frame, common.RS) orelse continue;
         const frame = host_shm.frame[0..rs_idx];
@@ -312,7 +306,7 @@ const RecvCtx = struct {
 fn clientRecvLoop(ctx: *RecvCtx) void {
     const shm = @as(*ShmRegion, @ptrCast(ctx.mmap_slice.ptr));
 
-    while (!(g_sigint_ctx orelse unreachable).triggered.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         csem.wait(&shm.data_sem) catch break;
 
         const rs_idx = std.mem.indexOfScalar(u8, &shm.frame, common.RS) orelse continue;
@@ -351,9 +345,6 @@ fn sendLeaveBestEffort(alloc: std.mem.Allocator, host_shm: *ShmRegion, name: []c
 }
 
 pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []const u8) !void {
-    var sigint_ctx = SigIntCtx{ .triggered = std.atomic.Value(bool).init(false) };
-    g_sigint_ctx = &sigint_ctx;
-    defer g_sigint_ctx = null;
     attachSigintHandler();
 
     const pid = std.os.linux.getpid();
@@ -423,7 +414,7 @@ pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []co
     const stdin = std.fs.File.stdin();
     var stdin_reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buf);
-    while (!sigint_ctx.triggered.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
         if (ready == 0) continue;

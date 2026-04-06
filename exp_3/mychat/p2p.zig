@@ -52,10 +52,10 @@ const ShmRegion = extern struct {
     }
 };
 
-var g_shutdown = std.atomic.Value(i32).init(0);
+var g_shutdown = std.atomic.Value(bool).init(false);
 
 fn sigintHandler(_: i32, _: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    g_shutdown.store(1, .monotonic);
+    g_shutdown.store(true, .monotonic);
 }
 
 fn attachSigintHandler() void {
@@ -135,7 +135,7 @@ fn handleFrame(alloc: std.mem.Allocator, my_name: []const u8, frame: []const u8)
 
 fn recvLoop(shm: *ShmRegion, me: Role, alloc: std.mem.Allocator, name: []const u8) void {
     var buf: [common.MAX_FRAME_LEN]u8 = undefined;
-    while (g_shutdown.load(.monotonic) == 0) {
+    while (!g_shutdown.load(.monotonic)) {
         p2pRecv(shm, me, &buf);
         handleFrame(alloc, name, &buf) catch |err| {
             std.log.warn("Cannot handle frame: {}.", .{err});
@@ -154,7 +154,7 @@ fn sendLoop(shm: *ShmRegion, me: Role, alloc: std.mem.Allocator, name: []const u
 
     var stdin_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
-    while (g_shutdown.load(.monotonic) == 0) {
+    while (!g_shutdown.load(.monotonic)) {
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
         if (ready == 0) continue;

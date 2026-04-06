@@ -8,16 +8,10 @@ const ZOMBIE_CHECK_INTERVAL_MS: i32 = 500;
 
 const FIFO_NAME_PATTERN = "/tmp/mychat-{s}-{d}.fifo";
 
-const SigIntCtx = struct {
-    flag: std.atomic.Value(bool),
-};
-
-var g_sigint_ctx: ?*SigIntCtx = null;
+var g_shutdown = std.atomic.Value(bool).init(false);
 
 fn sigintHandler(_: i32, _: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    if (g_sigint_ctx) |ctx| {
-        ctx.flag.store(true, .monotonic);
-    }
+    g_shutdown.store(true, .monotonic);
 }
 
 fn attachSigintHandler() void {
@@ -217,7 +211,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     var reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var ctrl_fifo_reader = ctrl_fifo.reader(&reader_buf);
 
-    while (true) {
+    while (!g_shutdown.load(.monotonic)) {
         // Poll ctrl FIFO, process data if there's any, otherwise probe for zombies
         var fds = [_]std.posix.pollfd{.{ .fd = ctrl_fifo_fd, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, ZOMBIE_CHECK_INTERVAL_MS) catch |err| {
@@ -311,9 +305,6 @@ fn clientRecvLoop(ctx: RecvCtx) void {
 
 pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []const u8) !void {
     // Set a global flag when receiving SIGINT for shutdown
-    var sigint_ctx = SigIntCtx{ .flag = std.atomic.Value(bool).init(false) };
-    g_sigint_ctx = &sigint_ctx;
-    defer g_sigint_ctx = null;
     attachSigintHandler();
 
     const data_fifo_path = try allocPrintFifoPath(alloc, "client");
@@ -341,7 +332,7 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
     const stdin = std.fs.File.stdin();
     var stdin_reader_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     var stdin_reader = stdin.reader(&stdin_reader_buf);
-    while (!sigint_ctx.flag.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         // Stdin has data?
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
