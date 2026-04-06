@@ -79,11 +79,11 @@ fn allocParseWord(alloc: std.mem.Allocator, line: []const u8, index: *usize) Par
 }
 
 pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pipeline {
-    var pipeline = cmd.Pipeline.init();
-    errdefer pipeline.deinit(alloc);
+    var pipeline = cmd.Pipeline.init(alloc);
+    errdefer pipeline.deinit();
 
-    var current = cmd.Command.init();
-    errdefer current.deinit(alloc);
+    var current = cmd.Command.init(alloc);
+    errdefer current.deinit();
 
     var i: usize = 0;
     var pending_redir: ?struct { fd: u32, kind: cmd.RedirFileType } = null;
@@ -108,7 +108,7 @@ pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pip
         if (line[i] == '|') {
             if (current.argv.items.len == 0) return error.EmptyCommand;
             try pipeline.commands.append(alloc, current);
-            current = cmd.Command.init();
+            current = cmd.Command.init(alloc);
             i += 1;
             continue;
         }
@@ -160,7 +160,7 @@ pub fn allocParse(alloc: std.mem.Allocator, line: []u8) ParseResultError!cmd.Pip
         if (current.argv.items.len == 0) return error.EmptyCommand;
         try pipeline.commands.append(alloc, current);
     } else {
-        current.deinit(alloc);
+        current.deinit();
     }
 
     return pipeline;

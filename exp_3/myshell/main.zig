@@ -5,7 +5,7 @@ const isocline = @import("isocline");
 const cmd = @import("cmd.zig");
 const parse = @import("parse.zig");
 
-fn exec(alloc: std.mem.Allocator, command: cmd.Command, prev_read: ?std.posix.fd_t, pipefds: ?[2]std.posix.fd_t) !noreturn {
+fn allocExec(alloc: std.mem.Allocator, command: cmd.Command, prev_read: ?std.posix.fd_t, pipefds: ?[2]std.posix.fd_t) !noreturn {
     if (prev_read) |fd| {
         // Read from previous stage
         try std.posix.dup2(fd, std.posix.STDIN_FILENO);
@@ -99,7 +99,7 @@ fn execBuiltin(log: *std.io.Writer, command: *const cmd.Command, in_parent: bool
     }
 }
 
-fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *const cmd.Pipeline) !void {
+fn allocExecutePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *const cmd.Pipeline) !void {
     if (pipeline.commands.items.len == 0) return;
 
     var pids = try alloc.alloc(std.posix.pid_t, pipeline.commands.items.len);
@@ -120,7 +120,7 @@ fn executePipeline(alloc: std.mem.Allocator, log: *std.io.Writer, pipeline: *con
             if (isBuiltin(argv0)) {
                 _ = execBuiltin(log, &command, false);
             } else {
-                exec(alloc, command, prev_read, pipefd) catch |err| {
+                allocExec(alloc, command, prev_read, pipefd) catch |err| {
                     log.print("{s}: {s}\n", .{ argv0, @errorName(err) }) catch {};
                     std.posix.exit(127);
                 };
@@ -180,12 +180,12 @@ pub fn main() !void {
             stderr.print("{s}: Syntax error: {s}\n", .{ argv0, @errorName(err) }) catch {};
             continue;
         };
-        defer pipeline.deinit(alloc);
+        defer pipeline.deinit();
 
         if (pipeline.commands.items.len == 1 and pipeline.commands.items[0].argv.items.len >= 1 and isBuiltin(pipeline.commands.items[0].argv.items[0])) {
             _ = execBuiltin(stderr, &pipeline.commands.items[0], true);
         } else {
-            executePipeline(alloc, stderr, &pipeline) catch |err| {
+            allocExecutePipeline(alloc, stderr, &pipeline) catch |err| {
                 stderr.print("{s}\n", .{@errorName(err)}) catch {};
             };
         }
