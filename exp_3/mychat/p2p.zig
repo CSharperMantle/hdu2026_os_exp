@@ -16,17 +16,33 @@ const Role = enum { host, client };
 const ShmRegion = extern struct {
     const Self = @This();
 
+    // Prevent multiple clients.
+    client_present: csem.sem_t,
+    // Sync scheme for half-duplex bidirectional comms
     turnstile: csem.sem_t,
     empty: csem.sem_t,
     full_host: csem.sem_t,
     full_client: csem.sem_t,
-
+    // Shared uni-elem buffer
     data: [common.MAX_FRAME_LEN]u8,
 
     pub const SemPair = struct {
         mine: *csem.sem_t,
         opposite: *csem.sem_t,
     };
+
+    pub fn initAsHost(self: *Self) !void {
+        try csem.init(&self.client_present, 1, 1);
+        errdefer csem.destroy(&self.client_present) catch {};
+        try csem.init(&self.turnstile, 1, 1);
+        errdefer csem.destroy(&self.turnstile) catch {};
+        try csem.init(&self.empty, 1, 1);
+        errdefer csem.destroy(&self.empty) catch {};
+        try csem.init(&self.full_host, 1, 0);
+        errdefer csem.destroy(&self.full_host) catch {};
+        try csem.init(&self.full_client, 1, 0);
+        errdefer csem.destroy(&self.full_client) catch {};
+    }
 
     pub fn getFullSems(self: *Self, me: Role) SemPair {
         return switch (me) {
@@ -175,15 +191,7 @@ pub fn runHost(alloc: std.mem.Allocator, name: []const u8) !void {
     defer std.posix.munmap(shm_slice);
 
     const shm = @as(*ShmRegion, @ptrCast(shm_slice.ptr));
-
-    try csem.init(&shm.turnstile, 1, 1);
-    errdefer csem.destroy(&shm.turnstile) catch {};
-    try csem.init(&shm.empty, 1, 1);
-    errdefer csem.destroy(&shm.empty) catch {};
-    try csem.init(&shm.full_host, 1, 0);
-    errdefer csem.destroy(&shm.full_host) catch {};
-    try csem.init(&shm.full_client, 1, 0);
-    errdefer csem.destroy(&shm.full_client) catch {};
+    try shm.initAsHost();
 
     std.log.info("Host SHM: {s}", .{shm_name});
 
@@ -209,6 +217,15 @@ pub fn runClient(alloc: std.mem.Allocator, host_shm_name: []const u8, name: []co
     );
     defer std.posix.munmap(shm_slice);
     const shm = @as(*ShmRegion, @ptrCast(shm_slice.ptr));
+
+    try csem.wait(&shm.client_present);
+    defer csem.post(&shm.client_present) catch @panic("csem.post(&shm.client_present)");
+
+    {
+        const joined_msg = try common.allocColorizeMetaTag(alloc, "Successfully joined.");
+        defer alloc.free(joined_msg);
+        std.log.info("{s}", .{joined_msg});
+    }
 
     const join_frame = try common.allocJoinFrame(alloc, name, host_shm_name);
     defer alloc.free(join_frame);
