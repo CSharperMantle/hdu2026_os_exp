@@ -187,6 +187,7 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
 }
 
 pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
+    attachSigintHandler();
     var clients: std.StringHashMap(Client) = .init(alloc);
     defer {
         var iter = clients.iterator();
@@ -204,7 +205,8 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     defer std.fs.deleteFileAbsolute(ctrl_fifo_path) catch {};
     std.log.info("Control FIFO: {s}", .{ctrl_fifo_path});
 
-    const ctrl_fifo = try std.fs.openFileAbsolute(ctrl_fifo_path, .{ .mode = .read_only });
+    // HACK: Open as RW to prevent from blocking on read, interfering with SIGINT handling.
+    const ctrl_fifo = try std.fs.openFileAbsolute(ctrl_fifo_path, .{ .mode = .read_write });
     defer ctrl_fifo.close();
     const ctrl_fifo_fd = ctrl_fifo.handle;
 

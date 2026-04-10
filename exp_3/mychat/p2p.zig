@@ -171,6 +171,7 @@ fn sendLoop(shm: *ShmRegion, me: Role, alloc: std.mem.Allocator, name: []const u
 }
 
 pub fn runHost(alloc: std.mem.Allocator, name: []const u8) !void {
+    attachSigintHandler();
     const pid = std.os.linux.getpid();
     const shm_name = try std.fmt.allocPrint(alloc, P2P_SHM_PATTERN, .{pid});
     defer alloc.free(shm_name);

@@ -207,6 +207,7 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
 }
 
 pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
+    attachSigintHandler();
     var clients: std.StringHashMap(Client) = .init(alloc);
     defer {
         var iter = clients.iterator();
