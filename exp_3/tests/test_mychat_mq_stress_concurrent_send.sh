@@ -8,6 +8,8 @@ source "$(dirname "$0")/common.sh"
 MYCHAT="${1:?Usage: $0 path/to/mychat}"
 TEST_DIR="$(mktemp -d)"
 
+N_MSG_EACH=10
+
 cleanup() {
 	kill -INT "$HOST_PID" "$ALICE_PID" "$BOB_PID" "$CHARLIE_PID" 2>/dev/null || true
 	exec 3>&- 4>&- 5>&- 2>/dev/null || true
@@ -35,22 +37,35 @@ exec 5>"$TEST_DIR/charlie_in.fifo"
 
 wait_for_count "$TEST_DIR/host.log" "Joined:" 3 20 || fail "Not all clients joined"
 
-{ echo "STRESS_alice_0"; } >&3 &
+{
+	for ((i = 1; i <= N_MSG_EACH; i++)); do
+		echo "STRESS_alice_$i"
+	done
+} >&3 &
 FA=$!
-{ echo "STRESS_bob_0"; } >&4 &
+{
+	for ((i = 1; i <= N_MSG_EACH; i++)); do
+		echo "STRESS_bob_$i"
+	done
+} >&4 &
 FB=$!
-{ echo "STRESS_charlie_0"; } >&5 &
+{
+	for ((i = 1; i <= N_MSG_EACH; i++)); do
+		echo "STRESS_charlie_$i"
+	done
+} >&5 &
 FC=$!
 wait "$FA" "$FB" "$FC"
 
-wait_for_count "$TEST_DIR/host.log" "STRESS_" 3 100 || {
-	actual=$(grep -c "STRESS_" "$TEST_DIR/host.log" 2>/dev/null) || actual=0
-	fail "Expected 3 STRESS messages, got $actual"
+exec 3>&- 4>&- 5>&-
+wait_for_count "$TEST_DIR/host.log" "STRESS_" "$((N_MSG_EACH * 3))" 100 || {
+	ACTUAL=$(grep -c "STRESS_" "$TEST_DIR/host.log" 2>/dev/null) || ACTUAL=0
+	MSG="$(printf "%s\n  -- host.log --\n%s\n  --------------\n" "Expected $((N_MSG_EACH * 3)) STRESS messages, got $ACTUAL." "$(cat "$TEST_DIR/host.log")")"
+	fail "$MSG"
 }
 
 grep -q "Cannot handle frame" "$TEST_DIR/host.log" && fail "Frame parsing errors"
 
-exec 3>&- 4>&- 5>&-
 kill -INT "$HOST_PID"
 wait "$HOST_PID" 2>/dev/null || true
 pass
