@@ -8,9 +8,9 @@ const cshm = common.cshm;
 
 const SHM_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
-const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 500;
-const DELIVERY_TIMEOUT_MS: comptime_int = 500;
-const MAX_RETRY_COUNT: comptime_int = 3; // Declare client as zombie after this threshold
+const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 250;
+const DELIVERY_TIMEOUT_MS: comptime_int = 100;
+const MAX_RETRY_COUNT: comptime_int = 5; // Declare client as zombie after this threshold
 
 const HOST_SHM_NAME = "/mychat-host";
 const CLIENT_SHM_PATTERN = "/mychat-client-{d}";

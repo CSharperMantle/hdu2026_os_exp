@@ -5,7 +5,7 @@ const cmq = common.cmq;
 
 const MQ_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
-const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 500;
+const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 250;
 
 const HOST_MQ_NAME = "/mychat-host";
 const CLIENT_MQ_PATTERN = "/mychat-client-{d}";

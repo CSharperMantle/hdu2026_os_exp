@@ -4,7 +4,7 @@ const common = @import("common.zig");
 
 const FIFO_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
-const ZOMBIE_CHECK_INTERVAL_MS: i32 = 500;
+const ZOMBIE_CHECK_INTERVAL_MS: i32 = 250;
 
 const FIFO_NAME_PATTERN = "/tmp/mychat-{s}-{d}.fifo";
 
