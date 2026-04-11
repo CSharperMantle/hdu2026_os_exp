@@ -246,12 +246,14 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
 
     std.log.info("Host SHM: {s}", .{HOST_SHM_NAME});
 
+    var frame_buf: [common.MAX_FRAME_LEN]u8 = undefined;
     while (!g_shutdown.load(.monotonic)) {
         try csem.wait(&host_shm.data_sem);
-        const rs_idx = std.mem.indexOfScalar(u8, &host_shm.frame, common.RS) orelse continue;
-        const frame = host_shm.frame[0..rs_idx];
+        @memcpy(&frame_buf, &host_shm.frame);
         try csem.post(&host_shm.space_sem);
 
+        const rs_idx = std.mem.indexOfScalar(u8, &frame_buf, common.RS) orelse @panic("std.mem.indexOfScalar(u8, &frame_buf, common.RS)");
+        const frame = frame_buf[0..rs_idx];
         hostHandleFrame(alloc, &clients, frame) catch |err| {
             std.log.warn("Cannot handle frame: {}.", .{err});
         };
