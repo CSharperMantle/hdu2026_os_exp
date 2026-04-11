@@ -233,7 +233,7 @@ fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
         common.csem.wait(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
         probeZombies(ctx.alloc, ctx.clients) catch {};
-        common.csem.post(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
+        common.csem.post(ctx.clients_sem) catch @panic("common.csem.post(ctx.clients_sem)");
     }
 }
 
