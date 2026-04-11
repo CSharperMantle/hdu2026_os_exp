@@ -86,7 +86,7 @@ fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) void
     }
 }
 
-fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), frame: []const u8) !void {
+fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), clients_sem: *common.csem.sem_t, frame: []const u8) !void {
     // We can't takeDelimiter from an MQ, so manually check and unpack the record structure.
     var record_iter = std.mem.splitScalar(u8, frame, common.RS);
     const record = record_iter.next() orelse return error.MalformedFrame;
@@ -108,52 +108,65 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         const name_ = try common.allocColorizeUsername(alloc, name);
         defer alloc.free(name_);
 
-        if (clients.contains(name)) {
-            std.log.warn("Duplicated joining request for {s}, ignoring", .{name_});
-            return;
-        }
-        try clients.put(name, try Client.init(alloc, client_mq_name));
+        {
+            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
+            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            if (clients.contains(name)) {
+                std.log.warn("Duplicated joining request for {s}, ignoring", .{name_});
+                return;
+            }
+            try clients.put(name, try Client.init(alloc, client_mq_name));
 
-        const tag = try common.allocColorizeMetaTag(alloc, "Joined:");
-        defer alloc.free(tag);
-        std.log.info("{s} {s}", .{ tag, name_ });
-
-        const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
-        defer alloc.free(bcast_msg);
-        broadcast(clients, bcast_msg);
-    } else if (std.mem.eql(u8, kind, "MSG")) {
-        const name = unit_iter.next() orelse return error.MalformedFrame;
-        const msg = unit_iter.next() orelse return error.MalformedFrame;
-        if (clients.getEntry(name) != null) {
-            const name_ = try common.allocColorizeUsername(alloc, name);
-            defer alloc.free(name_);
-            std.log.info("[{s}] {s}", .{ name_, msg });
-
-            const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
-            defer alloc.free(bcast_msg);
-            broadcast(clients, bcast_msg);
-        } else {
-            std.log.warn("Message from unregistered client: {s}", .{name});
-        }
-    } else if (std.mem.eql(u8, kind, "LEAVE")) {
-        const name = unit_iter.next() orelse return error.MalformedFrame;
-        if (clients.fetchRemove(name)) |client| {
-            const name_ = try common.allocColorizeUsername(alloc, name);
-            defer alloc.free(name_);
-            const tag = try common.allocColorizeMetaTag(alloc, "Left:");
+            const tag = try common.allocColorizeMetaTag(alloc, "Joined:");
             defer alloc.free(tag);
             std.log.info("{s} {s}", .{ tag, name_ });
 
-            alloc.free(client.key);
-            var value = client.value;
-            value.deinit();
-            const bcast_msg = try common.allocLeaveFrame(alloc, name);
+            const bcast_msg = try common.allocJoinFrame(alloc, name, "<redacted>");
             defer alloc.free(bcast_msg);
             broadcast(clients, bcast_msg);
-        } else {
-            const name_ = try common.allocColorizeUsername(alloc, name);
-            defer alloc.free(name_);
-            std.log.warn("Received LEAVE for non-existent client: {s}", .{name_});
+        }
+    } else if (std.mem.eql(u8, kind, "MSG")) {
+        const name = unit_iter.next() orelse return error.MalformedFrame;
+        const msg = unit_iter.next() orelse return error.MalformedFrame;
+        {
+            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
+            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            if (clients.getEntry(name) != null) {
+                const name_ = try common.allocColorizeUsername(alloc, name);
+                defer alloc.free(name_);
+                std.log.info("[{s}] {s}", .{ name_, msg });
+
+                const bcast_msg = try common.allocMsgFrame(alloc, name, msg);
+                defer alloc.free(bcast_msg);
+                broadcast(clients, bcast_msg);
+            } else {
+                std.log.warn("Message from unregistered client: {s}", .{name});
+            }
+        }
+    } else if (std.mem.eql(u8, kind, "LEAVE")) {
+        const name = unit_iter.next() orelse return error.MalformedFrame;
+        {
+            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
+            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+
+            if (clients.fetchRemove(name)) |client| {
+                const name_ = try common.allocColorizeUsername(alloc, name);
+                defer alloc.free(name_);
+                const tag = try common.allocColorizeMetaTag(alloc, "Left:");
+                defer alloc.free(tag);
+                std.log.info("{s} {s}", .{ tag, name_ });
+
+                alloc.free(client.key);
+                var value = client.value;
+                value.deinit();
+                const bcast_msg = try common.allocLeaveFrame(alloc, name);
+                defer alloc.free(bcast_msg);
+                broadcast(clients, bcast_msg);
+            } else {
+                const name_ = try common.allocColorizeUsername(alloc, name);
+                defer alloc.free(name_);
+                std.log.warn("Received LEAVE for non-existent client: {s}", .{name_});
+            }
         }
     }
     if (unit_iter.next() != null) {
@@ -191,7 +204,7 @@ fn testMqExists(mq_name: []const u8) bool {
     return true;
 }
 
-// Probe and reap newly-found zombies.
+// Probe and reap zombies.
 fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
     var zombies = std.ArrayList([]u8).empty;
     defer {
@@ -212,13 +225,15 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
 const ZombieProbeCtx = struct {
     alloc: std.mem.Allocator,
     clients: *std.StringHashMap(Client),
-    running: *std.atomic.Value(bool),
+    clients_sem: *common.csem.sem_t,
 };
 
 fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
-    while (ctx.running.load(.monotonic)) {
+    while (!g_shutdown.load(.monotonic)) {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
+        common.csem.wait(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
         probeZombies(ctx.alloc, ctx.clients) catch {};
+        common.csem.post(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
     }
 }
 
@@ -249,17 +264,19 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     std.log.info("Host MQ: {s}", .{HOST_MQ_NAME});
 
     // Start zombie probe thread
-    var running = std.atomic.Value(bool).init(true);
+    const clients_sem = try alloc.create(common.csem.sem_t);
+    try common.csem.init(clients_sem, 0, 1);
+    defer {
+        common.csem.destroy(clients_sem) catch @panic("common.csem.destroy(clients_sem)");
+        alloc.destroy(clients_sem);
+    }
     const probe_ctx = ZombieProbeCtx{
         .alloc = alloc,
         .clients = &clients,
-        .running = &running,
+        .clients_sem = clients_sem,
     };
     const probe_thread = try std.Thread.spawn(.{}, zombieProbeLoop, .{probe_ctx});
-    defer {
-        running.store(false, .monotonic);
-        probe_thread.join();
-    }
+    defer probe_thread.join();
 
     var recv_buf: [common.MAX_FRAME_LEN]u8 = undefined;
 
@@ -272,7 +289,7 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
         if (received == 0) continue;
         const frame = recv_buf[0..received];
 
-        hostHandleFrame(alloc, &clients, frame) catch |err| {
+        hostHandleFrame(alloc, &clients, clients_sem, frame) catch |err| {
             std.log.warn("Cannot handle frame: {}. raw={x})", .{ err, frame });
         };
     }
