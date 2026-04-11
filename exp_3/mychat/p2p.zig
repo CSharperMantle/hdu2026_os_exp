@@ -158,10 +158,11 @@ fn sendLoop(shm: *ShmRegion, me: Role, alloc: std.mem.Allocator, name: []const u
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
         if (ready == 0) continue;
+        if (fds[0].revents & std.posix.POLL.HUP != 0) break; // stdin pipe closed
         if (fds[0].revents & std.posix.POLL.IN == 0) continue;
 
         const maybe_line = stdin_reader.interface.takeDelimiter('\n') catch break;
-        const line = maybe_line orelse continue;
+        const line = maybe_line orelse break; // null = EOF
         if (line.len == 0) continue;
 
         const frame = common.allocMsgFrame(alloc, name, line) catch continue;

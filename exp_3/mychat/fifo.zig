@@ -323,7 +323,9 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
     joined = true;
 
     const my_name = try alloc.dupe(u8, name);
-    const recv = try std.fs.openFileAbsolute(data_fifo_path, .{ .mode = .read_only });
+    // HACK: Open as RW so the client holds a write end, preventing transient EOF
+    // when the host's per-broadcast writer closes between messages.
+    const recv = try std.fs.openFileAbsolute(data_fifo_path, .{ .mode = .read_write });
     const recv_thread = try std.Thread.spawn(.{}, clientRecvLoop, .{RecvCtx{
         .alloc = alloc,
         .my_name = my_name,
@@ -339,11 +341,11 @@ pub fn runClient(alloc: std.mem.Allocator, ctrl_fifo_path: []const u8, name: []c
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
         if (ready == 0) continue; // timeout, check if interrupted.
+        if (fds[0].revents & std.posix.POLL.HUP != 0) break; // stdin pipe closed
         if (fds[0].revents & std.posix.POLL.IN == 0) continue;
 
-        const maybe_line = stdin_reader.interface.takeDelimiter('\n') catch break;
-        const line = maybe_line orelse continue;
-        if (line.len == 0) continue;
+        const line = stdin_reader.interface.takeDelimiter('\n') catch break orelse break;
+        if (line.len == 0) break;
         try sendMsg(alloc, ctrl_fifo_path, name, line);
     }
 }

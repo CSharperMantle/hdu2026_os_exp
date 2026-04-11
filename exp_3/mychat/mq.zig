@@ -411,11 +411,10 @@ pub fn runClient(alloc: std.mem.Allocator, host_mq_name: []const u8, name: []con
         var fds = [_]std.posix.pollfd{.{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 }};
         const ready = std.posix.poll(&fds, CHECK_SIGINT_INTERVAL) catch break;
         if (ready == 0) continue; // timeout, check if interrupted.
+        if (fds[0].revents & std.posix.POLL.HUP != 0) break; // stdin pipe closed
         if (fds[0].revents & std.posix.POLL.IN == 0) continue;
 
-        const maybe_line = stdin_reader.interface.takeDelimiter('\n') catch break;
-        const line = maybe_line orelse continue;
-        if (line.len == 0) continue;
+        const line = stdin_reader.interface.takeDelimiter('\n') catch break orelse break;
         try sendMsg(alloc, host_mq_name, name, line);
     }
 }
