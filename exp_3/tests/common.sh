@@ -5,12 +5,12 @@ pass() {
 }
 
 fail() {
-	echo "FAIL: $*" >&2
+	echo "$*" >&2
 	exit 1
 }
 
 bust() {
-	echo "HARNESS BUSTED: $*" >&2
+	echo "$*" >&2
 	exit 2
 }
 
