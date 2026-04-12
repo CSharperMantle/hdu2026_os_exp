@@ -197,8 +197,7 @@ fn reapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), zo
     }
 }
 
-// Probe and reap zombies.
-fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
+fn probeAndReapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
     var zombies = std.ArrayList([]u8).empty;
     defer {
         for (zombies.items) |name| alloc.free(name);
@@ -224,7 +223,7 @@ fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
     while (!g_shutdown.load(.monotonic)) {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
         csem.wait(ctx.clients_sem) catch @panic("csem.wait(ctx.clients_sem)");
-        probeZombies(ctx.alloc, ctx.clients) catch {};
+        probeAndReapZombies(ctx.alloc, ctx.clients) catch {};
         csem.post(ctx.clients_sem) catch @panic("csem.post(ctx.clients_sem)");
     }
 }

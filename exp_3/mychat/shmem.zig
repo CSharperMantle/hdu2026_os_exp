@@ -9,7 +9,7 @@ const cshm = common.cshm;
 const SHM_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
 const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 250;
-const DELIVERY_TIMEOUT_MS: comptime_int = 100;
+const DELIVERY_TIMEOUT_MS: comptime_int = 10;
 const MAX_RETRY_COUNT: comptime_int = 3; // Declare client as zombie after this threshold
 
 const HOST_SHM_NAME = "/mychat-host";
@@ -194,15 +194,18 @@ fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) void
     var iter = clients.iterator();
     while (iter.next()) |entry| {
         const client = entry.value_ptr;
-        if (deliverToClient(client, buffer)) {
-            client.n_retries = 0;
-        } else {
-            client.n_retries += 1;
+        while (client.n_retries < MAX_RETRY_COUNT) {
+            if (deliverToClient(client, buffer)) {
+                client.n_retries = 0;
+                break;
+            } else {
+                client.n_retries += 1;
+            }
         }
     }
 }
 
-fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
+fn probeAndReapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
     var zombies = std.ArrayList([]u8).empty;
     defer {
         for (zombies.items) |name| alloc.free(name);
@@ -228,7 +231,7 @@ fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
     while (!g_shutdown.load(.monotonic)) {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
         csem.wait(ctx.clients_sem) catch @panic("csem.wait(ctx.clients_sem)");
-        probeZombies(ctx.alloc, ctx.clients) catch {};
+        probeAndReapZombies(ctx.alloc, ctx.clients) catch {};
         csem.post(ctx.clients_sem) catch @panic("csem.post(ctx.clients_sem)");
     }
 }
