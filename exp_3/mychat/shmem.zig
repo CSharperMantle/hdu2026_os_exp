@@ -77,7 +77,7 @@ const Client = struct {
     }
 };
 
-fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), clients_sem: *common.csem.sem_t, frame: []const u8) !void {
+fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), clients_sem: *csem.sem_t, frame: []const u8) !void {
     var unit_iter = std.mem.splitScalar(u8, frame, common.US);
 
     const kind = unit_iter.next() orelse return error.MalformedFrame;
@@ -90,8 +90,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         defer alloc.free(name_);
 
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
             if (clients.contains(name)) {
                 std.log.warn("Duplicated joining request for {s}, ignoring", .{name_});
                 return;
@@ -110,8 +110,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         const name = unit_iter.next() orelse return error.MalformedFrame;
         const msg = unit_iter.next() orelse return error.MalformedFrame;
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
             if (clients.getEntry(name) != null) {
                 const name_ = try common.allocColorizeUsername(alloc, name);
                 defer alloc.free(name_);
@@ -127,8 +127,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
     } else if (std.mem.eql(u8, kind, "LEAVE")) {
         const name = unit_iter.next() orelse return error.MalformedFrame;
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
             if (clients.fetchRemove(name)) |client| {
                 const name_ = try common.allocColorizeUsername(alloc, name);
                 defer alloc.free(name_);
@@ -221,15 +221,15 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
 const ZombieProbeCtx = struct {
     alloc: std.mem.Allocator,
     clients: *std.StringHashMap(Client),
-    clients_sem: *common.csem.sem_t,
+    clients_sem: *csem.sem_t,
 };
 
 fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
     while (!g_shutdown.load(.monotonic)) {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
-        common.csem.wait(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
+        csem.wait(ctx.clients_sem) catch @panic("csem.wait(ctx.clients_sem)");
         probeZombies(ctx.alloc, ctx.clients) catch {};
-        common.csem.post(ctx.clients_sem) catch @panic("common.csem.post(ctx.clients_sem)");
+        csem.post(ctx.clients_sem) catch @panic("csem.post(ctx.clients_sem)");
     }
 }
 
@@ -274,10 +274,10 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     std.log.info("Host SHM: {s}", .{HOST_SHM_NAME});
 
     // Start zombie probe thread
-    const clients_sem = try alloc.create(common.csem.sem_t);
-    try common.csem.init(clients_sem, 0, 1);
+    const clients_sem = try alloc.create(csem.sem_t);
+    try csem.init(clients_sem, 0, 1);
     defer {
-        common.csem.destroy(clients_sem) catch @panic("common.csem.destroy(clients_sem)");
+        csem.destroy(clients_sem) catch @panic("csem.destroy(clients_sem)");
         alloc.destroy(clients_sem);
     }
     const probe_ctx = ZombieProbeCtx{

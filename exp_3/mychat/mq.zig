@@ -2,10 +2,12 @@ const std = @import("std");
 
 const common = @import("common.zig");
 const cmq = common.cmq;
+const csem = common.csem;
 
 const MQ_PERM: comptime_int = 0o600;
 const CHECK_SIGINT_INTERVAL: comptime_int = 100;
 const ZOMBIE_CHECK_INTERVAL_MS: comptime_int = 250;
+const MAX_RETRY_COUNT: comptime_int = 3; // Declare client as zombie after this threshold
 
 const HOST_MQ_NAME = "/mychat-host";
 const CLIENT_MQ_PATTERN = "/mychat-client-{d}";
@@ -37,25 +39,18 @@ const Client = struct {
     const Self = @This();
 
     mq_name: []u8,
-    mq: cmq.mqd_t,
+    n_retries: u8,
     alloc: std.mem.Allocator,
 
     pub fn init(alloc: std.mem.Allocator, mq_name: []const u8) !Client {
-        const mq = try cmq.open(
-            mq_name,
-            .{ .ACCMODE = .WRONLY },
-            0,
-            null,
-        );
         return Client{
             .mq_name = try alloc.dupe(u8, mq_name),
-            .mq = mq,
+            .n_retries = 0,
             .alloc = alloc,
         };
     }
 
     pub fn deinit(self: *Self) void {
-        cmq.close(self.mq) catch unreachable;
         self.alloc.free(self.mq_name);
         self.* = undefined;
     }
@@ -66,27 +61,36 @@ fn allocClientMqName(alloc: std.mem.Allocator) ![]u8 {
     return std.fmt.allocPrint(alloc, CLIENT_MQ_PATTERN, .{pid});
 }
 
-fn send(mq_name: []const u8, buf: []const u8) !void {
+fn send(mq_name: []const u8, buf: []const u8, nonblock: bool) !void {
     const mqd = try cmq.open(
         mq_name,
-        .{ .ACCMODE = .WRONLY },
+        .{
+            .ACCMODE = .WRONLY,
+            .NONBLOCK = nonblock,
+        },
         0,
         null,
     );
-    defer cmq.close(mqd) catch unreachable;
+    defer cmq.close(mqd) catch @panic("cmq.close(mqd)");
 
     try cmq.send(mqd, buf, 0);
 }
 
-// Don't try to find zombies.
 fn broadcast(clients: *const std.StringHashMap(Client), buffer: []const u8) void {
     var iter = clients.valueIterator();
     while (iter.next()) |client| {
-        cmq.send(client.mq, buffer, 0) catch {};
+        while (client.n_retries < MAX_RETRY_COUNT) {
+            send(client.mq_name, buffer, true) catch {
+                client.n_retries += 1;
+                continue;
+            };
+            client.n_retries = 0;
+            break;
+        }
     }
 }
 
-fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), clients_sem: *common.csem.sem_t, frame: []const u8) !void {
+fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), clients_sem: *csem.sem_t, frame: []const u8) !void {
     // We can't takeDelimiter from an MQ, so manually check and unpack the record structure.
     var record_iter = std.mem.splitScalar(u8, frame, common.RS);
     const record = record_iter.next() orelse return error.MalformedFrame;
@@ -109,8 +113,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         defer alloc.free(name_);
 
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
             if (clients.contains(name)) {
                 std.log.warn("Duplicated joining request for {s}, ignoring", .{name_});
                 return;
@@ -129,8 +133,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
         const name = unit_iter.next() orelse return error.MalformedFrame;
         const msg = unit_iter.next() orelse return error.MalformedFrame;
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
             if (clients.getEntry(name) != null) {
                 const name_ = try common.allocColorizeUsername(alloc, name);
                 defer alloc.free(name_);
@@ -146,8 +150,8 @@ fn hostHandleFrame(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)
     } else if (std.mem.eql(u8, kind, "LEAVE")) {
         const name = unit_iter.next() orelse return error.MalformedFrame;
         {
-            common.csem.wait(clients_sem) catch @panic("common.csem.wait(clients_sem)");
-            defer common.csem.post(clients_sem) catch @panic("common.csem.post(clients_sem)");
+            csem.wait(clients_sem) catch @panic("csem.wait(clients_sem)");
+            defer csem.post(clients_sem) catch @panic("csem.post(clients_sem)");
 
             if (clients.fetchRemove(name)) |client| {
                 const name_ = try common.allocColorizeUsername(alloc, name);
@@ -193,17 +197,6 @@ fn reapZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client), zo
     }
 }
 
-fn testMqExists(mq_name: []const u8) bool {
-    const mqd = cmq.open(
-        mq_name,
-        .{ .ACCMODE = .WRONLY },
-        0,
-        null,
-    ) catch return false;
-    cmq.close(mqd) catch unreachable;
-    return true;
-}
-
 // Probe and reap zombies.
 fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !void {
     var zombies = std.ArrayList([]u8).empty;
@@ -214,8 +207,7 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
     var iter = clients.iterator();
     while (iter.next()) |entry| {
         const name = entry.key_ptr.*;
-        const mq_name = entry.value_ptr.mq_name;
-        if (!testMqExists(mq_name)) {
+        if (entry.value_ptr.n_retries >= MAX_RETRY_COUNT) {
             try zombies.append(alloc, try alloc.dupe(u8, name));
         }
     }
@@ -225,15 +217,15 @@ fn probeZombies(alloc: std.mem.Allocator, clients: *std.StringHashMap(Client)) !
 const ZombieProbeCtx = struct {
     alloc: std.mem.Allocator,
     clients: *std.StringHashMap(Client),
-    clients_sem: *common.csem.sem_t,
+    clients_sem: *csem.sem_t,
 };
 
 fn zombieProbeLoop(ctx: ZombieProbeCtx) void {
     while (!g_shutdown.load(.monotonic)) {
         std.Thread.sleep(ZOMBIE_CHECK_INTERVAL_MS * std.time.ns_per_ms);
-        common.csem.wait(ctx.clients_sem) catch @panic("common.csem.wait(ctx.clients_sem)");
+        csem.wait(ctx.clients_sem) catch @panic("csem.wait(ctx.clients_sem)");
         probeZombies(ctx.alloc, ctx.clients) catch {};
-        common.csem.post(ctx.clients_sem) catch @panic("common.csem.post(ctx.clients_sem)");
+        csem.post(ctx.clients_sem) catch @panic("csem.post(ctx.clients_sem)");
     }
 }
 
@@ -264,10 +256,10 @@ pub fn runHost(alloc: std.mem.Allocator, _: []const u8) !void {
     std.log.info("Host MQ: {s}", .{HOST_MQ_NAME});
 
     // Start zombie probe thread
-    const clients_sem = try alloc.create(common.csem.sem_t);
-    try common.csem.init(clients_sem, 0, 1);
+    const clients_sem = try alloc.create(csem.sem_t);
+    try csem.init(clients_sem, 0, 1);
     defer {
-        common.csem.destroy(clients_sem) catch @panic("common.csem.destroy(clients_sem)");
+        csem.destroy(clients_sem) catch @panic("csem.destroy(clients_sem)");
         alloc.destroy(clients_sem);
     }
     const probe_ctx = ZombieProbeCtx{
@@ -370,19 +362,19 @@ fn clientRecvLoop(ctx: RecvCtx) void {
 fn sendJoin(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, client_mq_name: []const u8) !void {
     const frame = try common.allocJoinFrame(alloc, name, client_mq_name);
     defer alloc.free(frame);
-    try send(mq_name, frame);
+    try send(mq_name, frame, false);
 }
 
 fn sendMsg(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8, msg: []const u8) !void {
     const frame = try common.allocMsgFrame(alloc, name, msg);
     defer alloc.free(frame);
-    try send(mq_name, frame);
+    try send(mq_name, frame, false);
 }
 
 fn sendLeaveBestEffort(alloc: std.mem.Allocator, mq_name: []const u8, name: []const u8) void {
     const frame = common.allocLeaveFrame(alloc, name) catch return;
     defer alloc.free(frame);
-    send(mq_name, frame) catch {};
+    send(mq_name, frame, true) catch {};
 }
 
 pub fn runClient(alloc: std.mem.Allocator, host_mq_name: []const u8, name: []const u8) !void {
