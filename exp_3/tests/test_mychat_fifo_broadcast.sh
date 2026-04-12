@@ -1,7 +1,7 @@
 #!/bin/bash
 # Host broadcasts messages to all clients.
 
-set -eo pipefail
+set -exo pipefail
 
 source "$(dirname "$0")/common.sh"
 
@@ -35,13 +35,14 @@ exec 5>"$TEST_DIR/charlie_in.fifo"
 wait_for_count "$TEST_DIR/host.log" "Joined:" 3 20 || fail "Not all clients joined"
 
 echo "from_alice" >&3
-echo "from_bob" >&4
-
 wait_for_line "$TEST_DIR/bob.log" "from_alice" || fail "Bob missing alice's msg"
 wait_for_line "$TEST_DIR/charlie.log" "from_alice" || fail "Charlie missing alice's msg"
+
+echo "from_bob" >&4
 wait_for_line "$TEST_DIR/alice.log" "from_bob" || fail "Alice missing bob's msg"
 wait_for_line "$TEST_DIR/charlie.log" "from_bob" || fail "Charlie missing bob's msg"
 
+kill -INT "$ALICE_PID" "$BOB_PID" "$CHARLIE_PID"
 exec 3>&- 4>&- 5>&-
 wait_for_count "$TEST_DIR/host.log" "Left:" 3 20 || fail "Not all clients left"
 

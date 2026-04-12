@@ -43,7 +43,7 @@ for i in {0..5}; do
 	wait_for_line "$TEST_DIR/alice.log" "alive_check_$i" || fail "Alice message $i failed"
 done
 
-wait_for_line "$TEST_DIR/host.log" "Reaped zombie" 100 || fail "Host did not reap zombie"
+wait_for_line "$TEST_DIR/host.log" "Reaped zombie client:" || fail "Host did not reap zombie"
 
 exec 4>&-
 wait "$ALICE_PID" 2>/dev/null || true

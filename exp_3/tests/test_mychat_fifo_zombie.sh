@@ -30,13 +30,19 @@ wait_for_count "$TEST_DIR/host.log" "Joined:" 1 20 || fail "Zombie did not join"
 
 kill -KILL "$ZOMBIE_PID" 2>/dev/null || true
 exec 3>&-
-wait_for_line "$TEST_DIR/host.log" "Reaped zombie" 80 || fail "Host did not reap zombie"
 
 mkfifo "$TEST_DIR/alice_in.fifo"
 "$MYCHAT" -C "$HOST_FIFO" -m fifo -n alice <"$TEST_DIR/alice_in.fifo" >/dev/null 2>"$TEST_DIR/alice.log" &
 ALICE_PID=$!
 exec 4>"$TEST_DIR/alice_in.fifo"
 wait_for_count "$TEST_DIR/host.log" "Joined:" 2 20 || fail "Alice did not join"
+
+for i in {0..5}; do
+	echo "alive_check_$i" >&4
+	wait_for_line "$TEST_DIR/alice.log" "alive_check_$i" || fail "Alice message $i failed"
+done
+
+wait_for_line "$TEST_DIR/host.log" "Reaped zombie client:" || fail "Host did not reap zombie"
 
 exec 4>&-
 wait "$ALICE_PID" 2>/dev/null || true
