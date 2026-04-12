@@ -46,7 +46,7 @@ done
 wait_for_line "$TEST_DIR/host.log" "Reaped zombie client: zombie" || fail "Host did not reap zombie"
 
 exec 4>&-
-wait $ALICE_PID 2>/dev/null || true
+wait "$ALICE_PID" 2>/dev/null || true
 kill -INT "$HOST_PID"
-wait $HOST_PID 2>/dev/null || true
+wait "$HOST_PID" 2>/dev/null || true
 pass
