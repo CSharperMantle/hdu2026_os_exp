@@ -39,18 +39,21 @@ wait_for_count "$TEST_DIR/host.log" "Joined:" 3 20 || fail "Not all clients join
 {
 	for ((i = 1; i <= N_MSG_EACH; i++)); do
 		echo "STRESS_alice_$i"
+		sleep 0
 	done
 } >&3 &
 FA=$!
 {
 	for ((i = 1; i <= N_MSG_EACH; i++)); do
 		echo "STRESS_bob_$i"
+		sleep 0
 	done
 } >&4 &
 FB=$!
 {
 	for ((i = 1; i <= N_MSG_EACH; i++)); do
 		echo "STRESS_charlie_$i"
+		sleep 0
 	done
 } >&5 &
 FC=$!
