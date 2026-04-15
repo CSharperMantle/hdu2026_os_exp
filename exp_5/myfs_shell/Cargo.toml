@@ -1,0 +1,5 @@
+[package]
+name = "myfs_shell"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 AND CC-BY-SA-4.0"

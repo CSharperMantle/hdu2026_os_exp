@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = [
+    "exp_5/myfs",
+    "exp_5/mkfs_myfs",
+    "exp_5/myfs_shell",
+]
