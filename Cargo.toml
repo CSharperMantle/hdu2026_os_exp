@@ -5,3 +5,6 @@ members = [
     "exp_5/mkfs_myfs",
     "exp_5/myfs_shell",
 ]
+
+[workspace.lints.clippy]
+all = "warn"
