@@ -1,7 +1,7 @@
 #!/bin/bash
 # Host broadcasts messages to all clients.
 
-set -exo pipefail
+set -eo pipefail
 
 source "$(dirname "$0")/common.sh"
 
