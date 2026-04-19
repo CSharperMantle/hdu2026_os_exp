@@ -305,11 +305,7 @@ impl Shell {
         {
             println!(
                 "{:<4} {:>8} {:>4} {:>8} {}",
-                kind.label(),
-                size,
-                start_cluster.0,
-                loc,
-                short_name
+                kind, size, start_cluster.0, loc, short_name
             );
         }
         Ok(())
@@ -317,7 +313,7 @@ impl Shell {
 
     fn print_root_stat(&self, entry: &myfs::NodeMeta) {
         println!("path: /");
-        println!("type: {}", entry.kind.label());
+        println!("type: {}", entry.kind);
         println!("size: {}", entry.size);
         println!("start_cluster: {}", entry.start_cluster.0);
     }
@@ -328,7 +324,7 @@ impl Shell {
             println!("loc: {}", loc);
         }
         println!("name: {}", entry.short_name);
-        println!("type: {}", entry.kind.label());
+        println!("type: {}", entry.kind);
         println!("size: {}", entry.size);
         println!("start_cluster: {}", entry.start_cluster.0);
         println!("ctime: {}", entry.ctime);

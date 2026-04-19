@@ -109,6 +109,15 @@ pub enum NodeKind {
     Directory,
 }
 
+impl fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NodeKind::File => write!(f, "FILE"),
+            NodeKind::Directory => write!(f, "DIR"),
+        }
+    }
+}
+
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FcbAttr(pub u8);
@@ -141,19 +150,6 @@ impl From<NodeKind> for FcbAttr {
         match value {
             NodeKind::File => FcbAttr::FILE,
             NodeKind::Directory => FcbAttr::DIRECTORY,
-        }
-    }
-}
-
-impl NodeKind {
-    pub fn attr(self) -> FcbAttr {
-        self.into()
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            NodeKind::File => "FILE",
-            NodeKind::Directory => "DIR",
         }
     }
 }
@@ -254,7 +250,7 @@ impl Fcb {
         Ok(Self {
             file_name: encoded.0,
             ext_name: encoded.1,
-            attr: kind.attr(),
+            attr: kind.into(),
             ctime: 0,
             cdate: 0,
             start_cluster,

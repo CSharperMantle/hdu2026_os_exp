@@ -95,7 +95,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
             loc: None,
             short_name: "/".to_string(),
             kind: NodeKind::Directory,
-            size: self.directory_size(self.root_dir_cluster())?,
+            size: self.dir_size(self.root_dir_cluster())?,
             start_cluster: self.root_dir_cluster(),
             ctime: 0,
             cdate: 0,
@@ -104,7 +104,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn lookup(&self, parent_dir: ClusterId, name: &str) -> Result<(DirEntryLoc, Fcb), FsError> {
         let key = normalize_component(name)?;
-        for (loc, slot) in self.scan_directory(parent_dir)? {
+        for (loc, slot) in self.scan_dir(parent_dir)? {
             if let DirSlot::Occupied(fcb) = slot
                 && fcb.short_name() == key
             {
@@ -121,7 +121,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
             loc: Some(loc),
             short_name: fcb.short_name(),
             kind,
-            size: self.display_size(&fcb)?,
+            size: self.size_of(&fcb)?,
             start_cluster: fcb.start_cluster,
             ctime: fcb.ctime,
             cdate: fcb.cdate,
@@ -130,13 +130,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn list_dir(&self, dir_start: ClusterId) -> Result<Vec<DirEntry>, FsError> {
         let mut entries = Vec::new();
-        for (loc, slot) in self.scan_directory(dir_start)? {
+        for (loc, slot) in self.scan_dir(dir_start)? {
             if let DirSlot::Occupied(fcb) = slot {
                 entries.push(DirEntry {
                     loc,
                     short_name: fcb.short_name(),
                     kind: fcb.kind()?,
-                    size: self.display_size(&fcb)?,
+                    size: self.size_of(&fcb)?,
                     start_cluster: fcb.start_cluster,
                 });
             }
@@ -153,10 +153,10 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if self.lookup(parent_dir, &key).is_ok() {
             return Err(FsError::InvalidPath(format!("{key} already exists")));
         }
-        let loc = self.find_free_directory_slot(parent_dir)?;
+        let loc = self.find_free_dir_slot(parent_dir)?;
         let fcb = Fcb::new(&key, NodeKind::File, ClusterId::FREE, 0)?;
         self.write_fcb_at(loc, &fcb)?;
-        self.update_directory_size_on_disk(parent_dir)?;
+        self.update_dir_size_on_disk(parent_dir)?;
         Ok(loc)
     }
 
@@ -166,10 +166,10 @@ impl<D: BlockDevice> MyFileSystem<D> {
             return Err(FsError::InvalidPath(format!("{key} already exists")));
         }
         let new_cluster = self.allocate_clusters(1)?[0];
-        let loc = self.find_free_directory_slot(parent_dir)?;
+        let loc = self.find_free_dir_slot(parent_dir)?;
         let fcb = Fcb::new(&key, NodeKind::Directory, new_cluster, 0)?;
         self.write_fcb_at(loc, &fcb)?;
-        self.update_directory_size_on_disk(parent_dir)?;
+        self.update_dir_size_on_disk(parent_dir)?;
         Ok(loc)
     }
 
@@ -183,7 +183,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         }
         self.free_chain_from(fcb.start_cluster)?;
         self.mark_slot_deleted(loc)?;
-        self.update_directory_size_on_disk(loc.dir_start)?;
+        self.update_dir_size_on_disk(loc.dir_start)?;
         Ok(())
     }
 
@@ -192,12 +192,12 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if fcb.kind()? != NodeKind::Directory {
             return Err(FsError::NotADirectory(fcb.short_name()));
         }
-        if !self.scan_directory(fcb.start_cluster)?.is_empty() {
+        if !self.scan_dir(fcb.start_cluster)?.is_empty() {
             return Err(FsError::DirectoryNotEmpty(fcb.short_name()));
         }
         self.free_chain_from(fcb.start_cluster)?;
         self.mark_slot_deleted(loc)?;
-        self.update_directory_size_on_disk(loc.dir_start)?;
+        self.update_dir_size_on_disk(loc.dir_start)?;
         Ok(())
     }
 
@@ -342,16 +342,16 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn display_size(&self, fcb: &Fcb) -> Result<u32, FsError> {
+    fn size_of(&self, fcb: &Fcb) -> Result<u32, FsError> {
         if fcb.kind()? == NodeKind::Directory {
-            self.directory_size(fcb.start_cluster)
+            self.dir_size(fcb.start_cluster)
         } else {
             Ok(fcb.size)
         }
     }
 
-    fn directory_size(&self, dir_start: ClusterId) -> Result<u32, FsError> {
-        Ok(self.directory_entry_count(dir_start)? as u32 * FCB_SIZE as u32)
+    fn dir_size(&self, dir_start: ClusterId) -> Result<u32, FsError> {
+        Ok(self.scan_dir(dir_start)?.len() as u32 * FCB_SIZE as u32)
     }
 
     fn ensure_fcb_capacity(
@@ -597,7 +597,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn scan_directory(&self, dir_start: ClusterId) -> Result<Vec<(DirEntryLoc, DirSlot)>, FsError> {
+    fn scan_dir(&self, dir_start: ClusterId) -> Result<Vec<(DirEntryLoc, DirSlot)>, FsError> {
         let mut out = Vec::new();
         let chain = self.cluster_chain(dir_start)?;
         let entries_per_cluster = self.cluster_size() / FCB_SIZE;
@@ -666,7 +666,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok((cluster, slot_index * FCB_SIZE))
     }
 
-    fn find_free_directory_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
+    fn find_free_dir_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
         let chain = self.cluster_chain(dir_start)?;
         let entries_per_cluster = self.cluster_size() / FCB_SIZE;
         let mut entry_index = 0u32;
@@ -700,16 +700,12 @@ impl<D: BlockDevice> MyFileSystem<D> {
         })
     }
 
-    fn directory_entry_count(&self, dir_start: ClusterId) -> Result<usize, FsError> {
-        Ok(self.scan_directory(dir_start)?.len())
-    }
-
-    fn update_directory_size_on_disk(&mut self, dir_start: ClusterId) -> Result<(), FsError> {
+    fn update_dir_size_on_disk(&mut self, dir_start: ClusterId) -> Result<(), FsError> {
         if dir_start == self.root_dir_cluster() {
             return Ok(());
         }
-        let size = self.directory_size(dir_start)?;
-        if let Some(loc) = self.find_directory_loc_by_start(dir_start)? {
+        let size = self.dir_size(dir_start)?;
+        if let Some(loc) = self.find_dir_loc(self.root_dir_cluster(), dir_start)? {
             let mut fcb = self.read_fcb_at(loc)?;
             fcb.size = size;
             self.write_fcb_at(loc, &fcb)?;
@@ -717,26 +713,19 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn find_directory_loc_by_start(
-        &self,
-        target: ClusterId,
-    ) -> Result<Option<DirEntryLoc>, FsError> {
-        self.find_directory_loc_recursive(self.root_dir_cluster(), target)
-    }
-
-    fn find_directory_loc_recursive(
+    fn find_dir_loc(
         &self,
         dir_start: ClusterId,
         target: ClusterId,
     ) -> Result<Option<DirEntryLoc>, FsError> {
-        for (loc, slot) in self.scan_directory(dir_start)? {
+        for (loc, slot) in self.scan_dir(dir_start)? {
             if let DirSlot::Occupied(fcb) = slot
                 && fcb.kind()? == NodeKind::Directory
             {
                 if fcb.start_cluster == target {
                     return Ok(Some(loc));
                 }
-                if let Some(found) = self.find_directory_loc_recursive(fcb.start_cluster, target)? {
+                if let Some(found) = self.find_dir_loc(fcb.start_cluster, target)? {
                     return Ok(Some(found));
                 }
             }
