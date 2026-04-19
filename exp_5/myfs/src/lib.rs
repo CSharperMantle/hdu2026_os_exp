@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn enforces_open_file_rules_end_to_end() {
+    fn enforces_open_file_rules() {
         let mut fs = fs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "ONE.TXT").unwrap();
         let handle = fs.open(file_loc).unwrap();
