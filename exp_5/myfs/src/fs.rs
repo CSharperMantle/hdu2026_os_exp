@@ -7,6 +7,8 @@ pub const DEFAULT_BLOCK_COUNT: u16 = 128;
 pub const ROOT_DIR_START_CLUSTER: ClusterId = ClusterId(2);
 pub const ROOT_DIR_CLUSTER_COUNT: u16 = 2;
 
+/// The ID of a FAT cluster.
+/// TODO: Currently one cluster equals one block. Make it parametric!
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClusterId(pub u16);
@@ -25,6 +27,7 @@ impl ClusterId {
     pub const EOC: Self = Self(Self::FAT_EOC);
 }
 
+/// The ID of a block, aka sector.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub u16);
@@ -156,6 +159,7 @@ impl NodeKind {
 }
 
 /// On-disk boot-region metadata for filesystem image.
+/// To be stored in the first block of the device.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootSector {
@@ -168,6 +172,14 @@ pub struct BootSector {
     pub data_start_block: BlockId,
     pub root_dir_start_cluster: ClusterId,
     pub root_dir_cluster_count: u16,
+}
+
+pub const BOOT_SECTOR_SIZE: usize = std::mem::size_of::<BootSector>();
+
+impl From<&BootSector> for [u8; BOOT_SECTOR_SIZE] {
+    fn from(boot: &BootSector) -> Self {
+        unsafe { std::mem::transmute_copy::<BootSector, Self>(boot) }
+    }
 }
 
 /// In-memory formatter input.
@@ -191,6 +203,12 @@ impl FsConfig {
         if !(64..=1024).contains(&self.block_size) {
             return Err(FsError::InvalidConfig(format!(
                 "block size {} must be between 64 and 1024",
+                self.block_size
+            )));
+        }
+        if (self.block_size as usize) < std::mem::size_of::<BootSector>() {
+            return Err(FsError::InvalidConfig(format!(
+                "boot sector does not fit in block size {}",
                 self.block_size
             )));
         }
@@ -223,6 +241,8 @@ pub struct Fcb {
     pub size: u32,
 }
 
+pub const FCB_SIZE: usize = std::mem::size_of::<Fcb>();
+
 impl Fcb {
     pub(crate) fn new(
         name: &str,
@@ -254,6 +274,12 @@ impl Fcb {
 
     pub fn kind(&self) -> Result<NodeKind, FsError> {
         self.attr.try_into()
+    }
+}
+
+impl From<&Fcb> for [u8; FCB_SIZE] {
+    fn from(fcb: &Fcb) -> Self {
+        unsafe { std::mem::transmute_copy::<Fcb, Self>(fcb) }
     }
 }
 

@@ -1,8 +1,6 @@
 use std::io::{self, Write};
 
-use myfs::{
-    ClusterId, DirEntry, DirEntryLoc, Fcb, FileHandle, FsConfig, MyFileSystem, NodeKind, OpenFile,
-};
+use myfs::*;
 
 fn main() {
     let mut shell = Shell::new().expect("filesystem should initialize");

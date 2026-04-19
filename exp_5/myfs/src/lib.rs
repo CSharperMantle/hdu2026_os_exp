@@ -8,7 +8,7 @@ pub use util::*;
 
 pub const MAX_OPEN_FILES: usize = 10;
 
-/// In-memory metadata view returned by runtime API.
+/// Metadata of a node returned by [`MyFileSystem::stat_root`] and [`MyFileSystem::stat`].
 #[derive(Debug, Clone)]
 pub struct NodeMeta {
     pub loc: Option<DirEntryLoc>,
@@ -20,7 +20,7 @@ pub struct NodeMeta {
     pub cdate: u16,
 }
 
-/// In-memory directory entry view returned by runtime API.
+/// An entry of the directory returned by [`MyFileSystem::list_dir`].
 #[derive(Debug, Clone)]
 pub struct DirEntry {
     pub loc: DirEntryLoc,
@@ -30,7 +30,7 @@ pub struct DirEntry {
     pub start_cluster: ClusterId,
 }
 
-/// In-memory opened-file table entry.
+/// State of an opened file.
 #[derive(Debug, Clone)]
 pub struct OpenFile {
     pub handle: FileHandle,
@@ -311,7 +311,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     fn write_boot_sector(&mut self) -> Result<(), FsError> {
         let mut block = vec![0; self.device.block_size()];
-        block[..BOOT_SECTOR_SIZE].copy_from_slice(&serialize_boot_sector(&self.boot));
+        let boot_bytes: [u8; BOOT_SECTOR_SIZE] = (&self.boot).into();
+        block[..BOOT_SECTOR_SIZE].copy_from_slice(&boot_bytes);
         self.device.write_block(BlockId(0), &block);
         Ok(())
     }
@@ -350,7 +351,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn directory_size(&self, dir_start: ClusterId) -> Result<u32, FsError> {
-        Ok(self.directory_entry_count(dir_start)? as u32 * DIR_ENTRY_SIZE as u32)
+        Ok(self.directory_entry_count(dir_start)? as u32 * FCB_SIZE as u32)
     }
 
     fn ensure_fcb_capacity(
@@ -599,13 +600,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn scan_directory(&self, dir_start: ClusterId) -> Result<Vec<(DirEntryLoc, DirSlot)>, FsError> {
         let mut out = Vec::new();
         let chain = self.cluster_chain(dir_start)?;
-        let entries_per_cluster = self.cluster_size() / DIR_ENTRY_SIZE;
+        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
         let mut entry_index = 0u32;
         for cluster in chain {
             let bytes = self.read_cluster_bytes(cluster)?;
             for slot in 0..entries_per_cluster {
-                let start = slot * DIR_ENTRY_SIZE;
-                let end = start + DIR_ENTRY_SIZE;
+                let start = slot * FCB_SIZE;
+                let end = start + FCB_SIZE;
                 let parsed = parse_dir_slot(&bytes[start..end])?;
                 match parsed {
                     DirSlot::Unused => {}
@@ -634,14 +635,15 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn read_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
         let (cluster, offset) = self.slot_position(loc)?;
         let bytes = self.read_cluster_bytes(cluster)?;
-        parse_dir_slot(&bytes[offset..offset + DIR_ENTRY_SIZE])
+        parse_dir_slot(&bytes[offset..offset + FCB_SIZE])
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
         let (cluster, offset) = self.slot_position(loc)?;
         let mut bytes = self.read_cluster_bytes(cluster)?;
-        bytes[offset..offset + DIR_ENTRY_SIZE].fill(0);
-        bytes[offset..offset + FCB_SERIALIZED_SIZE].copy_from_slice(&serialize_fcb(fcb));
+        bytes[offset..offset + FCB_SIZE].fill(0);
+        let fcb_bytes: [u8; FCB_SIZE] = fcb.into();
+        bytes[offset..offset + FCB_SIZE].copy_from_slice(&fcb_bytes);
         self.write_cluster_bytes(cluster, &bytes)?;
         Ok(())
     }
@@ -649,30 +651,30 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn mark_slot_deleted(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
         let (cluster, offset) = self.slot_position(loc)?;
         let mut bytes = self.read_cluster_bytes(cluster)?;
-        bytes[offset..offset + DIR_ENTRY_SIZE].fill(0);
+        bytes[offset..offset + FCB_SIZE].fill(0);
         bytes[offset] = SLOT_DELETED;
         self.write_cluster_bytes(cluster, &bytes)?;
         Ok(())
     }
 
     fn slot_position(&self, loc: DirEntryLoc) -> Result<(ClusterId, usize), FsError> {
-        let entries_per_cluster = self.cluster_size() / DIR_ENTRY_SIZE;
+        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
         let cluster_index = usize::try_from(loc.entry_index).unwrap() / entries_per_cluster;
         let slot_index = usize::try_from(loc.entry_index).unwrap() % entries_per_cluster;
         let chain = self.cluster_chain(loc.dir_start)?;
         let cluster = *chain.get(cluster_index).ok_or(FsError::NotFoundAt(loc))?;
-        Ok((cluster, slot_index * DIR_ENTRY_SIZE))
+        Ok((cluster, slot_index * FCB_SIZE))
     }
 
     fn find_free_directory_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
         let chain = self.cluster_chain(dir_start)?;
-        let entries_per_cluster = self.cluster_size() / DIR_ENTRY_SIZE;
+        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
         let mut entry_index = 0u32;
         for cluster in &chain {
             let bytes = self.read_cluster_bytes(*cluster)?;
             for slot in 0..entries_per_cluster {
-                let start = slot * DIR_ENTRY_SIZE;
-                let end = start + DIR_ENTRY_SIZE;
+                let start = slot * FCB_SIZE;
+                let end = start + FCB_SIZE;
                 match parse_dir_slot(&bytes[start..end])? {
                     DirSlot::Unused | DirSlot::Deleted => {
                         return Ok(DirEntryLoc {
