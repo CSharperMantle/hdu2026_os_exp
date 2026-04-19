@@ -40,14 +40,14 @@ pub struct OpenFile {
 }
 
 /// Driver object for mounted filesystem instance.
-pub struct MyFileSystem {
+pub struct MyFileSystem<D: BlockDevice> {
     boot: BootSector,
-    device: Box<dyn BlockDevice>,
+    device: D,
     open_files: [Option<OpenFile>; MAX_OPEN_FILES],
     next_handle: u32,
 }
 
-impl MyFileSystem {
+impl MyFileSystem<MemoryBlockDevice> {
     pub fn format_memory(config: FsConfig) -> Result<Self, FsError> {
         config.validate()?;
 
@@ -65,10 +65,10 @@ impl MyFileSystem {
         };
 
         let mut fs = Self {
-            device: Box::new(MemoryBlockDevice::new(
+            device: MemoryBlockDevice::new(
                 usize::from(config.block_size),
                 usize::from(config.block_count),
-            )),
+            ),
             boot,
             open_files: std::array::from_fn(|_| None),
             next_handle: 1,
@@ -79,7 +79,9 @@ impl MyFileSystem {
         fs.reserve_root_directory()?;
         Ok(fs)
     }
+}
 
+impl<D: BlockDevice> MyFileSystem<D> {
     pub fn boot_sector(&self) -> &BootSector {
         &self.boot
     }
@@ -765,8 +767,9 @@ fn compute_fat_block_count(
 mod tests {
     use super::*;
 
-    fn fs() -> MyFileSystem {
-        MyFileSystem::format_memory(FsConfig::default()).expect("filesystem should format")
+    fn fs() -> MyFileSystem<MemoryBlockDevice> {
+        MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
+            .expect("filesystem should format")
     }
 
     #[test]

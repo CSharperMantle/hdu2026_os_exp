@@ -1,7 +1,7 @@
-use myfs::{FsConfig, MyFileSystem};
+use myfs::{FsConfig, MemoryBlockDevice, MyFileSystem};
 
 fn main() {
-    let fs = MyFileSystem::format_memory(FsConfig::default())
+    let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
         .expect("default in-memory filesystem should format");
     let boot = fs.boot_sector();
     println!(

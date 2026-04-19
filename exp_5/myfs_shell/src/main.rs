@@ -13,14 +13,14 @@ fn main() {
 }
 
 struct Shell {
-    fs: MyFileSystem,
+    fs: MyFileSystem<MemoryBlockDevice>,
     cwd_cluster: ClusterId,
     cwd_path: String,
 }
 
 impl Shell {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let fs = MyFileSystem::format_memory(FsConfig::default())?;
+        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())?;
         Ok(Self {
             cwd_cluster: fs.root_dir_cluster(),
             cwd_path: "/".to_string(),
