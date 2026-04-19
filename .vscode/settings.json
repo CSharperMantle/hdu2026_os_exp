@@ -3,6 +3,8 @@
         "myfs",
         "myshell",
         "mychat",
+        "ctime",
+        "cdate",
     ],
     "editor.rulers": [100],
     "rust-analyzer.check.command": "clippy"

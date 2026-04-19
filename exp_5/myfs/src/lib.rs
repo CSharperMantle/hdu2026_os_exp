@@ -607,7 +607,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
             for slot in 0..entries_per_cluster {
                 let start = slot * FCB_SIZE;
                 let end = start + FCB_SIZE;
-                let parsed = parse_dir_slot(&bytes[start..end])?;
+                let parsed = DirSlot::try_from(&bytes[start..end])?;
                 match parsed {
                     DirSlot::Unused => {}
                     DirSlot::Deleted => {}
@@ -635,7 +635,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn read_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
         let (cluster, offset) = self.slot_position(loc)?;
         let bytes = self.read_cluster_bytes(cluster)?;
-        parse_dir_slot(&bytes[offset..offset + FCB_SIZE])
+        DirSlot::try_from(&bytes[offset..offset + FCB_SIZE])
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
@@ -675,7 +675,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
             for slot in 0..entries_per_cluster {
                 let start = slot * FCB_SIZE;
                 let end = start + FCB_SIZE;
-                match parse_dir_slot(&bytes[start..end])? {
+                match DirSlot::try_from(&bytes[start..end])? {
                     DirSlot::Unused | DirSlot::Deleted => {
                         return Ok(DirEntryLoc {
                             dir_start,
