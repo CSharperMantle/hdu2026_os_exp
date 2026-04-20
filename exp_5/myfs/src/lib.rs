@@ -864,7 +864,7 @@ fn compute_fat_block_count(
 mod tests {
     use super::*;
 
-    fn fs() -> MyFileSystem<MemoryBlockDevice> {
+    fn mkmemfs() -> MyFileSystem<MemoryBlockDevice> {
         MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
             .expect("filesystem should format")
     }
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn format_writes_boot_and_two_fat_copies() {
-        let fs = fs();
+        let fs = mkmemfs();
         let boot_block = fs.device.read_block(BlockId(0));
         assert_eq!(
             u16::from_le_bytes([boot_block[0], boot_block[1]]),
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn creates_lists_and_removes_directories() {
-        let mut fs = fs();
+        let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
         let docs_cluster = fs.read_fcb_at(docs_loc).unwrap().start_cluster;
         let readme_loc = fs.create_file(docs_cluster, "README.TXT").unwrap();
@@ -954,7 +954,7 @@ mod tests {
 
     #[test]
     fn writes_reads_and_seeks_across_clusters() {
-        let mut fs = fs();
+        let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = vec![0xAB; DEFAULT_BLOCK_SIZE + 200];
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn supports_lookup_and_root_stat_from_disk() {
-        let mut fs = fs();
+        let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
         let docs_fcb = fs.read_fcb_at(docs_loc).unwrap();
         let readme_loc = fs.create_file(docs_fcb.start_cluster, "A.TXT").unwrap();
@@ -991,7 +991,7 @@ mod tests {
 
     #[test]
     fn enforces_open_file_rules() {
-        let mut fs = fs();
+        let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "ONE.TXT").unwrap();
         let handle = fs.open(file_loc).unwrap();
         assert!(matches!(fs.open(file_loc), Err(FsError::AlreadyOpen(_))));
