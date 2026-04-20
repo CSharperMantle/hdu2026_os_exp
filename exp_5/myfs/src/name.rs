@@ -1,7 +1,8 @@
 //! File name and path utilities.
 
+use derive_more::Deref;
+use derive_more::DerefMut;
 use std::fmt;
-use std::ops::{Deref, DerefMut};
 
 use crate::FsError;
 
@@ -22,7 +23,7 @@ impl IsShortCompatible for char {
 ///
 /// ["Design of the FAT file system"](https://en.wikipedia.org/wiki/Design_of_the_FAT_file_system#Directory_table), Wikipedia.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deref, DerefMut, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpacedCharBuf<const SIZE: usize>([u8; SIZE]);
 
 impl<const SIZE: usize> SpacedCharBuf<SIZE> {
@@ -45,20 +46,6 @@ impl<const SIZE: usize> SpacedCharBuf<SIZE> {
 impl<const SIZE: usize> Default for SpacedCharBuf<SIZE> {
     fn default() -> Self {
         Self([Self::SPACE; SIZE])
-    }
-}
-
-impl<const SIZE: usize> Deref for SpacedCharBuf<SIZE> {
-    type Target = [u8; SIZE];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<const SIZE: usize> DerefMut for SpacedCharBuf<SIZE> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
