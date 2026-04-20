@@ -1,6 +1,7 @@
-use crate::util::*;
-
 use std::fmt;
+
+use crate::encode_short_name;
+use crate::decode_name_part;
 
 pub const DEFAULT_BLOCK_SIZE: usize = 1024;
 pub const DEFAULT_BLOCK_COUNT: u16 = 128;

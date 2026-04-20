@@ -652,7 +652,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let (cluster, offset) = self.slot_position(loc)?;
         let mut bytes = self.read_cluster_bytes(cluster)?;
         bytes[offset..offset + FCB_SIZE].fill(0);
-        bytes[offset] = SLOT_DELETED;
+        bytes[offset] = DirSlot::SLOT_DELETED;
         self.write_cluster_bytes(cluster, &bytes)?;
         Ok(())
     }

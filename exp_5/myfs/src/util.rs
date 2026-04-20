@@ -1,7 +1,14 @@
 use crate::{FCB_SIZE, Fcb, FsError};
 
-pub const SLOT_UNUSED: u8 = 0x00;
-pub const SLOT_DELETED: u8 = 0xE5;
+pub(crate) trait IsShort {
+    fn is_short(&self) -> bool;
+}
+
+impl IsShort for char {
+    fn is_short(&self) -> bool {
+        self.is_ascii_alphanumeric() || *self == '_'
+    }
+}
 
 pub(crate) enum DirSlot {
     Unused,
@@ -19,8 +26,8 @@ impl TryFrom<&[u8]> for DirSlot {
             ));
         }
         match value[0] {
-            SLOT_UNUSED => Ok(DirSlot::Unused),
-            SLOT_DELETED => Ok(DirSlot::Deleted),
+            Self::SLOT_UNUSED => Ok(DirSlot::Unused),
+            Self::SLOT_DELETED => Ok(DirSlot::Deleted),
             _ => {
                 let mut buf = [0u8; FCB_SIZE];
                 buf.copy_from_slice(&value[0..FCB_SIZE]);
@@ -30,6 +37,11 @@ impl TryFrom<&[u8]> for DirSlot {
             }
         }
     }
+}
+
+impl DirSlot {
+    pub const SLOT_UNUSED: u8 = 0x00;
+    pub const SLOT_DELETED: u8 = 0xE5;
 }
 
 pub(crate) fn normalize_component(component: &str) -> Result<String, FsError> {
@@ -54,7 +66,7 @@ pub(crate) fn encode_short_name(name: &str) -> Result<([u8; 8], [u8; 3]), FsErro
     if base.len() > 8 || ext.len() > 3 {
         return Err(FsError::InvalidName(name.to_string()));
     }
-    if !base.chars().all(valid_short_char) || !ext.chars().all(valid_short_char) {
+    if !base.chars().chain(ext.chars()).all(|ch| ch.is_short()) {
         return Err(FsError::InvalidName(name.to_string()));
     }
 
@@ -63,10 +75,6 @@ pub(crate) fn encode_short_name(name: &str) -> Result<([u8; 8], [u8; 3]), FsErro
     base_out[..base.len()].copy_from_slice(base.as_bytes());
     ext_out[..ext.len()].copy_from_slice(ext.as_bytes());
     Ok((base_out, ext_out))
-}
-
-pub(crate) fn valid_short_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 pub(crate) fn decode_name_part(bytes: &[u8]) -> String {
@@ -98,7 +106,7 @@ mod tests {
         ));
 
         let mut deleted = [0u8; FCB_SIZE];
-        deleted[0] = SLOT_DELETED;
+        deleted[0] = DirSlot::SLOT_DELETED;
         assert!(matches!(
             DirSlot::try_from(deleted.as_slice()).unwrap(),
             DirSlot::Deleted
