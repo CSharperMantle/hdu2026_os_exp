@@ -1,77 +1,141 @@
 //! File name and path utilities.
 
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 
-use crate::FCB_SIZE;
-use crate::Fcb;
 use crate::FsError;
 
-pub(crate) trait IsShortCompatible {
+trait IsShortCompatible {
     /// Can this char be stored in a [`ShortName`]?
     fn is_short_compatible(&self) -> bool;
 }
 
 impl IsShortCompatible for char {
     fn is_short_compatible(&self) -> bool {
-        self.is_ascii_alphanumeric() || *self == '_'
+        self.is_ascii_alphanumeric() || *self == '_' || *self == ' '
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum DirSlot {
-    Unused,
-    Deleted,
-    Occupied(Fcb),
+/// An [`u8`] array filled with `b' '` by default.
+///
+/// ## See also
+///
+/// ["Design of the FAT file system"](https://en.wikipedia.org/wiki/Design_of_the_FAT_file_system#Directory_table), Wikipedia.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpacedCharBuf<const SIZE: usize>([u8; SIZE]);
+
+impl<const SIZE: usize> SpacedCharBuf<SIZE> {
+    pub const SPACE: u8 = b' ';
+
+    /// FAT-visible length.
+    ///
+    /// Trailing spaces are padding. Internal spaces are part of the name.
+    pub fn len(&self) -> usize {
+        self.iter()
+            .rposition(|ch| *ch != Self::SPACE)
+            .map_or(0, |idx| idx + 1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.iter().all(|ch| *ch == Self::SPACE)
+    }
 }
 
-impl TryFrom<&[u8]> for DirSlot {
+impl<const SIZE: usize> Default for SpacedCharBuf<SIZE> {
+    fn default() -> Self {
+        Self([Self::SPACE; SIZE])
+    }
+}
+
+impl<const SIZE: usize> Deref for SpacedCharBuf<SIZE> {
+    type Target = [u8; SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<const SIZE: usize> DerefMut for SpacedCharBuf<SIZE> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<const SIZE: usize> AsRef<[u8; SIZE]> for SpacedCharBuf<SIZE> {
+    fn as_ref(&self) -> &[u8; SIZE] {
+        &self.0
+    }
+}
+
+impl<const SIZE: usize> AsMut<[u8; SIZE]> for SpacedCharBuf<SIZE> {
+    fn as_mut(&mut self) -> &mut [u8; SIZE] {
+        &mut self.0
+    }
+}
+
+impl<const SIZE: usize> AsRef<[u8]> for SpacedCharBuf<SIZE> {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<const SIZE: usize> AsMut<[u8]> for SpacedCharBuf<SIZE> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl<const SIZE: usize> From<[u8; SIZE]> for SpacedCharBuf<SIZE> {
+    fn from(value: [u8; SIZE]) -> Self {
+        Self(value)
+    }
+}
+
+impl<const SIZE: usize> From<SpacedCharBuf<SIZE>> for [u8; SIZE] {
+    fn from(value: SpacedCharBuf<SIZE>) -> Self {
+        value.0
+    }
+}
+
+impl<const SIZE: usize> From<SpacedCharBuf<SIZE>> for String {
+    fn from(value: SpacedCharBuf<SIZE>) -> Self {
+        let end = value.len();
+        String::from_utf8_lossy(&value.0[..end]).into_owned()
+    }
+}
+
+impl<const SIZE: usize> fmt::Display for SpacedCharBuf<SIZE> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", String::from(*self))
+    }
+}
+
+impl<const SIZE: usize> TryFrom<&str> for SpacedCharBuf<SIZE> {
     type Error = FsError;
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < FCB_SIZE {
-            return Err(FsError::CorruptFs(
-                "fcb slot shorter than expected".to_string(),
-            ));
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if value.len() > SIZE || !value.chars().all(|ch| ch.is_short_compatible()) {
+            return Err(FsError::InvalidName(value.to_string()));
         }
-        match value[0] {
-            Self::SLOT_UNUSED => Ok(DirSlot::Unused),
-            Self::SLOT_DELETED => Ok(DirSlot::Deleted),
-            _ => {
-                let mut buf = [0u8; FCB_SIZE];
-                buf.copy_from_slice(&value[0..FCB_SIZE]);
-                // SAFETY: Since the size of the buffers are the same, this should not be a problem on a native-endianness system.
-                let fcb = unsafe { std::mem::transmute::<[u8; FCB_SIZE], Fcb>(buf) };
-                Ok(DirSlot::Occupied(fcb))
-            }
-        }
+        let mut out = Self::default();
+        out[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(out)
     }
-}
-
-impl DirSlot {
-    pub const SLOT_UNUSED: u8 = 0x00;
-    pub const SLOT_DELETED: u8 = 0xE5;
-}
-
-fn spaced_to_string(bytes: &[u8]) -> String {
-    let end = match bytes.iter().position(|ch| *ch == b' ') {
-        None => bytes.len(),
-        Some(p) => p,
-    };
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 /// A file name (short name) used in [`MyFileSystem`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShortName {
-    pub base: [u8; Self::BASE_SIZE],
-    pub ext: [u8; Self::EXT_SIZE],
+    pub base: SpacedCharBuf<{ Self::BASE_SIZE }>,
+    pub ext: SpacedCharBuf<{ Self::EXT_SIZE }>,
 }
 
 impl fmt::Display for ShortName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base = spaced_to_string(&self.base);
-        let ext = spaced_to_string(&self.ext);
+        let base = self.base.to_string();
+        let ext = self.ext.to_string();
         if ext.is_empty() {
             write!(f, "{}", base)
         } else {
@@ -94,9 +158,6 @@ impl TryFrom<&str> for ShortName {
         if parts.next().is_some() {
             return Err(FsError::InvalidName(value.to_string()));
         }
-        if base.len() > Self::BASE_SIZE || ext.len() > Self::EXT_SIZE {
-            return Err(FsError::InvalidName(value.to_string()));
-        }
         if !base
             .chars()
             .chain(ext.chars())
@@ -104,14 +165,9 @@ impl TryFrom<&str> for ShortName {
         {
             return Err(FsError::InvalidName(value.to_string()));
         }
-
-        let mut base_out = [b' '; Self::BASE_SIZE];
-        let mut ext_out = [b' '; Self::EXT_SIZE];
-        base_out[..base.len()].copy_from_slice(base.as_bytes());
-        ext_out[..ext.len()].copy_from_slice(ext.as_bytes());
         Ok(ShortName {
-            base: base_out,
-            ext: ext_out,
+            base: SpacedCharBuf::try_from(base)?,
+            ext: SpacedCharBuf::try_from(ext)?,
         })
     }
 }
@@ -134,6 +190,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn spaced_char_buf_default_is_all_spaces() {
+        let buf = SpacedCharBuf::<8>::default();
+        assert_eq!(<[u8; 8]>::from(buf), [b' '; 8]);
+    }
+
+    #[test]
+    fn spaced_char_buf_try_from_and_display_work() {
+        let buf = SpacedCharBuf::<8>::try_from("README").unwrap();
+        assert_eq!(buf.to_string(), "README");
+        assert_eq!(buf.len(), 6);
+        assert_eq!(buf[0], b'R');
+        assert_eq!(buf[6], b' ');
+        assert!(SpacedCharBuf::<3>::try_from("TOOLONG").is_err());
+        assert!(SpacedCharBuf::<8>::try_from("BAD-NAME").is_err());
+    }
+
+    #[test]
+    fn spaced_char_buf_keeps_internal_spaces_but_trims_trailing_spaces() {
+        let buf = SpacedCharBuf::<8>::from(*b"A B     ");
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.to_string(), "A B");
+        assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn spaced_char_buf_all_spaces_is_empty_and_zero_len() {
+        let buf = SpacedCharBuf::<8>::default();
+        assert_eq!(buf.len(), 0);
+        assert!(buf.is_empty());
+        assert_eq!(buf.to_string(), "");
+    }
+
+    #[test]
     fn normalize_component_enforces_83_names() {
         assert_eq!(normalize_component("readme.txt").unwrap(), "README.TXT");
         assert!(normalize_component("too_long_name.txt").is_err());
@@ -142,18 +231,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_dir_slot_recognizes_unused_and_deleted() {
-        let unused = [0u8; FCB_SIZE];
-        assert!(matches!(
-            DirSlot::try_from(unused.as_slice()).unwrap(),
-            DirSlot::Unused
-        ));
-
-        let mut deleted = [0u8; FCB_SIZE];
-        deleted[0] = DirSlot::SLOT_DELETED;
-        assert!(matches!(
-            DirSlot::try_from(deleted.as_slice()).unwrap(),
-            DirSlot::Deleted
-        ));
+    fn short_name_uses_spaced_char_buf() {
+        let short = ShortName::try_from("readme.txt").unwrap();
+        assert_eq!(short.base.to_string(), "README");
+        assert_eq!(short.ext.to_string(), "TXT");
+        assert_eq!(short.to_string(), "README.TXT");
     }
 }

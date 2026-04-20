@@ -136,6 +136,41 @@ pub struct DirEntry {
     pub start_cluster: ClusterId,
 }
 
+#[derive(Debug, Clone)]
+enum DirSlot {
+    Unused,
+    Deleted,
+    Occupied(Fcb),
+}
+
+impl TryFrom<&[u8]> for DirSlot {
+    type Error = FsError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() < FCB_SIZE {
+            return Err(FsError::CorruptFs(
+                "fcb slot shorter than expected".to_string(),
+            ));
+        }
+        match value[0] {
+            Self::SLOT_UNUSED => Ok(DirSlot::Unused),
+            Self::SLOT_DELETED => Ok(DirSlot::Deleted),
+            _ => {
+                let mut buf = [0u8; FCB_SIZE];
+                buf.copy_from_slice(&value[0..FCB_SIZE]);
+                // SAFETY: Since the size of the buffers are the same, this should not be a problem on a native-endianness system.
+                let fcb = unsafe { std::mem::transmute::<[u8; FCB_SIZE], Fcb>(buf) };
+                Ok(DirSlot::Occupied(fcb))
+            }
+        }
+    }
+}
+
+impl DirSlot {
+    pub const SLOT_UNUSED: u8 = 0x00;
+    pub const SLOT_DELETED: u8 = 0xE5;
+}
+
 /// State of an opened file.
 #[derive(Debug, Clone)]
 pub struct OpenFile {
@@ -867,6 +902,22 @@ mod tests {
     fn mkmemfs() -> MyFileSystem<MemoryBlockDevice> {
         MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
             .expect("filesystem should format")
+    }
+
+    #[test]
+    fn parse_dir_slot_recognizes_unused_and_deleted() {
+        let unused = [0u8; FCB_SIZE];
+        assert!(matches!(
+            DirSlot::try_from(unused.as_slice()).unwrap(),
+            DirSlot::Unused
+        ));
+
+        let mut deleted = [0u8; FCB_SIZE];
+        deleted[0] = DirSlot::SLOT_DELETED;
+        assert!(matches!(
+            DirSlot::try_from(deleted.as_slice()).unwrap(),
+            DirSlot::Deleted
+        ));
     }
 
     #[test]
