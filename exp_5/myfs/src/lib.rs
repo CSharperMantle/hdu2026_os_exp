@@ -1110,6 +1110,30 @@ mod tests {
     }
 
     #[test]
+    fn node_oriented_api_resolves_and_stats() {
+        let mut fs = mkmemfs();
+        let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
+        let docs_node = fs.lookup_node(fs.root_node(), "DOCS").unwrap();
+        let docs_meta = fs.stat_node(docs_node).unwrap();
+        assert_eq!(docs_meta.loc, Some(docs_loc));
+        assert_eq!(docs_meta.short_name, "DOCS");
+        assert_eq!(docs_meta.kind, NodeKind::Directory);
+
+        let readme_loc = fs.create_file(docs_meta.start_cluster, "README.TXT").unwrap();
+        let readme_node = fs.lookup_node(docs_node, "README.TXT").unwrap();
+        let readme_meta = fs.stat_node(readme_node).unwrap();
+        assert_eq!(readme_meta.loc, Some(readme_loc));
+        assert_eq!(readme_meta.short_name, "README.TXT");
+
+        let entries = fs.list_dir_node(docs_node).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].node_id, readme_node);
+
+        let handle = fs.open_node(readme_node).unwrap();
+        fs.close(handle).unwrap();
+    }
+
+    #[test]
     fn packed_fcb_slots_can_cross_block_boundaries() {
         let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
             block_size: 64,
@@ -1153,6 +1177,29 @@ mod tests {
         assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
         fs.seek(handle, 0).unwrap();
         assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);
+    }
+
+    #[test]
+    fn fat_copies_stay_in_sync_after_mutations() {
+        let mut fs = mkmemfs();
+        let file_loc = fs.create_file(fs.root_dir_cluster(), "SYNC.BIN").unwrap();
+        let handle = fs.open(file_loc).unwrap();
+        let payload = vec![0xEF; DEFAULT_BLOCK_SIZE + 99];
+        fs.write(handle, &payload).unwrap();
+        fs.close(handle).unwrap();
+        fs.remove_file(file_loc).unwrap();
+
+        let fat_start = usize::from(u16::from(fs.boot.fat_start_block));
+        let fat_blocks = usize::from(fs.boot.fat_block_count);
+        for block in 0..fat_blocks {
+            let fat1 = fs
+                .device
+                .read_block(BlockId::from(u16::try_from(fat_start + block).unwrap()));
+            let fat2 = fs.device.read_block(BlockId::from(
+                u16::try_from(fat_start + fat_blocks + block).unwrap(),
+            ));
+            assert_eq!(fat1, fat2);
+        }
     }
 
     #[test]
