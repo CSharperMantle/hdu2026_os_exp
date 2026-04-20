@@ -790,28 +790,20 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn read_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
-        let (block, offset) = self.slot_position(loc)?;
-        let bytes = self.device.read_block(block);
-        DirSlot::try_from(&bytes[offset..offset + FCB_SIZE])
+        let bytes = self.read_chain_bytes(loc.dir_start, self.slot_offset(loc), FCB_SIZE)?;
+        DirSlot::try_from(bytes.as_slice())
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
-        let (block, offset) = self.slot_position(loc)?;
-        let mut write_result = Ok(());
-        self.modify_block(block, |bytes| {
-            bytes[offset..offset + FCB_SIZE].fill(0);
-            write_result = fcb.write_to_slice(&mut bytes[offset..offset + FCB_SIZE]);
-        });
-        write_result
+        let mut bytes = [0; FCB_SIZE];
+        fcb.write_to_slice(&mut bytes)?;
+        self.write_chain_bytes(loc.dir_start, self.slot_offset(loc), &bytes)
     }
 
     fn mark_slot_deleted(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
-        let (block, offset) = self.slot_position(loc)?;
-        self.modify_block(block, |bytes| {
-            bytes[offset..offset + FCB_SIZE].fill(0);
-            bytes[offset] = DirSlot::SLOT_DELETED;
-        });
-        Ok(())
+        let mut bytes = [0; FCB_SIZE];
+        bytes[0] = DirSlot::SLOT_DELETED;
+        self.write_chain_bytes(loc.dir_start, self.slot_offset(loc), &bytes)
     }
 
     /// Perform a read-modify-write procedure.
@@ -821,20 +813,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
         self.device.write_block(block, &bytes);
     }
 
-    fn slot_position(&self, loc: DirEntryLoc) -> Result<(BlockId, usize), FsError> {
-        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
-        let cluster_index = usize::try_from(loc.entry_index).unwrap() / entries_per_cluster;
-        let slot_index = usize::try_from(loc.entry_index).unwrap() % entries_per_cluster;
-        let chain = self.cluster_chain(loc.dir_start)?;
-        let cluster = *chain.get(cluster_index).ok_or(FsError::NotFoundAt(loc))?;
-        let byte_offset = slot_index * FCB_SIZE;
-        let block_offset = byte_offset / self.device.block_size();
-        let offset_in_block = byte_offset % self.device.block_size();
-        let block = *self
-            .cluster_blocks(cluster)?
-            .get(block_offset)
-            .ok_or_else(|| FsError::CorruptFs("slot offset beyond cluster blocks".to_string()))?;
-        Ok((block, offset_in_block))
+    fn slot_offset(&self, loc: DirEntryLoc) -> usize {
+        usize::try_from(loc.entry_index).unwrap() * FCB_SIZE
     }
 
     fn find_free_dir_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
@@ -1067,7 +1047,7 @@ mod tests {
         let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
-        let payload = vec![0xAB; DEFAULT_BLOCK_SIZE + 200];
+        let payload = [0xAB; DEFAULT_BLOCK_SIZE + 200];
         let written = fs.write(handle, &payload).unwrap();
         assert_eq!(written, payload.len());
         fs.seek(handle, 0).unwrap();
