@@ -295,18 +295,10 @@ impl Shell {
             println!("<empty>");
             return Ok(());
         }
-
-        for DirEntry {
-            loc,
-            short_name,
-            kind,
-            size,
-            start_cluster,
-        } in entries
-        {
+        for entry in entries {
             println!(
                 "{:<4} {:>8} {:>4} {:>8} {}",
-                kind, size, start_cluster, loc, short_name
+                entry.kind, entry.size, entry.start_cluster, entry.loc, entry.short_name
             );
         }
         Ok(())

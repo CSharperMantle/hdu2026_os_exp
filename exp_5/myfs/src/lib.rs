@@ -11,19 +11,6 @@ use std::fmt;
 
 pub const MAX_OPEN_FILES: usize = 10;
 
-/// Location of a directory entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DirEntryLoc {
-    pub dir_start: ClusterId,
-    pub entry_index: u32,
-}
-
-impl fmt::Display for DirEntryLoc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.dir_start, self.entry_index)
-    }
-}
-
 /// Error type for [`MyFileSystem`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
@@ -67,6 +54,66 @@ impl fmt::Display for FsError {
 }
 
 impl error::Error for FsError {}
+
+/// Location of a directory entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DirEntryLoc {
+    pub dir_start: ClusterId,
+    pub entry_index: u32,
+}
+
+impl fmt::Display for DirEntryLoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.dir_start, self.entry_index)
+    }
+}
+
+/// Session-stable node identifier for higher-level directory traversal APIs.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId(u64);
+
+impl NodeId {
+    pub const ROOT: Self = Self(0);
+}
+
+impl From<DirEntryLoc> for NodeId {
+    fn from(value: DirEntryLoc) -> Self {
+        Self((u64::from(u16::from(value.dir_start)) << 32) | u64::from(value.entry_index))
+    }
+}
+
+/// The result for creating a [`DirEntryLoc`] from a [`NodeId`].
+/// 
+/// For internal use only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirEntryLocFromNodeIdResult {
+    Root,
+    Leaf(DirEntryLoc),
+}
+
+impl From<NodeId> for DirEntryLocFromNodeIdResult {
+    fn from(value: NodeId) -> Self {
+        if value == NodeId::ROOT {
+            DirEntryLocFromNodeIdResult::Root
+        } else {
+            DirEntryLocFromNodeIdResult::Leaf(DirEntryLoc {
+                dir_start: ClusterId::from((value.0 >> 32) as u16),
+                entry_index: value.0 as u32,
+            })
+        }
+    }
+}
+
+impl fmt::Display for NodeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == Self::ROOT {
+            write!(f, "<root>")
+        } else {
+            write!(f, "{:x}", self.0)
+        }
+    }
+}
 
 /// Configurable parameters of [`MyFileSystem`].
 #[derive(Debug, Clone)]
@@ -131,6 +178,7 @@ impl FsConfig {
 /// Metadata of a node returned by [`MyFileSystem::stat_root`] and [`MyFileSystem::stat`].
 #[derive(Debug, Clone)]
 pub struct NodeMeta {
+    pub node_id: NodeId,
     pub loc: Option<DirEntryLoc>,
     pub short_name: String,
     pub kind: NodeKind,
@@ -143,6 +191,7 @@ pub struct NodeMeta {
 /// An entry of the directory returned by [`MyFileSystem::list_dir`].
 #[derive(Debug, Clone)]
 pub struct DirEntry {
+    pub node_id: NodeId,
     pub loc: DirEntryLoc,
     pub short_name: String,
     pub kind: NodeKind,
@@ -244,8 +293,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
         self.boot.root_dir_start_cluster
     }
 
+    pub fn root_node(&self) -> NodeId {
+        NodeId::ROOT
+    }
+
     pub fn stat_root(&self) -> Result<NodeMeta, FsError> {
         Ok(NodeMeta {
+            node_id: NodeId::ROOT,
             loc: None,
             short_name: "/".to_string(),
             kind: NodeKind::Directory,
@@ -272,6 +326,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let fcb = self.read_fcb_at(loc)?;
         let kind = fcb.kind()?;
         Ok(NodeMeta {
+            node_id: loc.into(),
             loc: Some(loc),
             short_name: fcb.short_name(),
             kind,
@@ -287,6 +342,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for (loc, slot) in self.scan_dir(dir_start)? {
             if let DirSlot::Occupied(fcb) = slot {
                 entries.push(DirEntry {
+                    node_id: loc.into(),
                     loc,
                     short_name: fcb.short_name(),
                     kind: fcb.kind()?,
@@ -296,6 +352,32 @@ impl<D: BlockDevice> MyFileSystem<D> {
             }
         }
         Ok(entries)
+    }
+
+    pub fn lookup_node(&self, parent: NodeId, name: &str) -> Result<NodeId, FsError> {
+        let parent_cluster = self.node_directory_cluster(parent)?;
+        let (loc, _) = self.lookup(parent_cluster, name)?;
+        Ok(loc.into())
+    }
+
+    pub fn stat_node(&self, node_id: NodeId) -> Result<NodeMeta, FsError> {
+        match node_id.into() {
+            DirEntryLocFromNodeIdResult::Root => self.stat_root(),
+            DirEntryLocFromNodeIdResult::Leaf(loc) => self.stat(loc),
+        }
+    }
+
+    pub fn list_dir_node(&self, node_id: NodeId) -> Result<Vec<DirEntry>, FsError> {
+        let dir_cluster = self.node_directory_cluster(node_id)?;
+        self.list_dir(dir_cluster)
+    }
+
+    pub fn open_node(&mut self, node_id: NodeId) -> Result<FileHandle, FsError> {
+        let loc = match node_id.into() {
+            DirEntryLocFromNodeIdResult::Root => Err(FsError::IsADirectory("/".to_string())),
+            DirEntryLocFromNodeIdResult::Leaf(loc) => Ok(loc),
+        }?;
+        self.open(loc)
     }
 
     pub fn create_file(
@@ -540,6 +622,19 @@ impl<D: BlockDevice> MyFileSystem<D> {
             .iter()
             .position(|entry| entry.as_ref().is_some_and(|open| open.handle == handle))
             .ok_or(FsError::InvalidHandle(handle))
+    }
+
+    fn node_directory_cluster(&self, node_id: NodeId) -> Result<ClusterId, FsError> {
+        match node_id.into() {
+            DirEntryLocFromNodeIdResult::Root => Ok(self.root_dir_cluster()),
+            DirEntryLocFromNodeIdResult::Leaf(loc) => {
+                let fcb = self.read_fcb_at(loc)?;
+                if fcb.kind()? != NodeKind::Directory {
+                    return Err(FsError::NotADirectory(fcb.short_name()));
+                }
+                Ok(fcb.start_cluster)
+            }
+        }
     }
 
     fn zero_cluster(&mut self, cluster: ClusterId) -> Result<(), FsError> {
