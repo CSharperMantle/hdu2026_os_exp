@@ -1,7 +1,9 @@
+//! File system abstractions and operations.
+
 use std::fmt;
 
-use crate::encode_short_name;
-use crate::decode_name_part;
+use crate::FsError;
+use crate::ShortName;
 
 pub const DEFAULT_BLOCK_SIZE: usize = 1024;
 pub const DEFAULT_BLOCK_COUNT: u16 = 128;
@@ -48,61 +50,6 @@ impl fmt::Display for FileHandle {
         write!(f, "{}", self.0)
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DirEntryLoc {
-    pub dir_start: ClusterId,
-    pub entry_index: u32,
-}
-
-impl fmt::Display for DirEntryLoc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.dir_start.0, self.entry_index)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FsError {
-    InvalidConfig(String),
-    InvalidName(String),
-    InvalidPath(String),
-    NotFound(String),
-    NotFoundAt(DirEntryLoc),
-    NotADirectory(String),
-    IsADirectory(String),
-    DirectoryNotEmpty(String),
-    NoSpace,
-    TooManyOpenFiles,
-    AlreadyOpen(DirEntryLoc),
-    FileOpen(DirEntryLoc),
-    InvalidHandle(FileHandle),
-    SeekOutOfBounds(usize),
-    CorruptFs(String),
-}
-
-impl fmt::Display for FsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FsError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
-            FsError::InvalidName(name) => write!(f, "invalid 8.3 name: {name}"),
-            FsError::InvalidPath(path) => write!(f, "invalid path: {path}"),
-            FsError::NotFound(name) => write!(f, "not found: {name}"),
-            FsError::NotFoundAt(loc) => write!(f, "not found at dir entry: {loc}"),
-            FsError::NotADirectory(name) => write!(f, "not a directory: {name}"),
-            FsError::IsADirectory(name) => write!(f, "is a directory: {name}"),
-            FsError::DirectoryNotEmpty(name) => write!(f, "directory not empty: {name}"),
-            FsError::NoSpace => write!(f, "filesystem is full"),
-            FsError::TooManyOpenFiles => write!(f, "too many opened files"),
-            FsError::AlreadyOpen(loc) => write!(f, "file already open: {loc}"),
-            FsError::FileOpen(loc) => write!(f, "file is open: {loc}"),
-            FsError::InvalidHandle(handle) => write!(f, "invalid handle: {handle}"),
-            FsError::SeekOutOfBounds(pos) => write!(f, "seek out of bounds: {pos}"),
-            FsError::CorruptFs(msg) => write!(f, "corrupt filesystem: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for FsError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -179,58 +126,11 @@ impl From<&BootSector> for [u8; BOOT_SECTOR_SIZE] {
     }
 }
 
-/// In-memory formatter input.
-#[derive(Debug, Clone)]
-pub struct FsConfig {
-    pub block_size: u16,
-    pub block_count: u16,
-}
-
-impl Default for FsConfig {
-    fn default() -> Self {
-        Self {
-            block_size: DEFAULT_BLOCK_SIZE as u16,
-            block_count: DEFAULT_BLOCK_COUNT,
-        }
-    }
-}
-
-impl FsConfig {
-    pub fn validate(&self) -> Result<(), FsError> {
-        if !(64..=1024).contains(&self.block_size) {
-            return Err(FsError::InvalidConfig(format!(
-                "block size {} must be between 64 and 1024",
-                self.block_size
-            )));
-        }
-        if (self.block_size as usize) < std::mem::size_of::<BootSector>() {
-            return Err(FsError::InvalidConfig(format!(
-                "boot sector does not fit in block size {}",
-                self.block_size
-            )));
-        }
-        if self.block_count <= 8 {
-            return Err(FsError::InvalidConfig(format!(
-                "block count {} is too small",
-                self.block_count
-            )));
-        }
-        if !self.block_size.is_multiple_of(64) {
-            return Err(FsError::InvalidConfig(format!(
-                "block size {} must be a multiple of 64",
-                self.block_size
-            )));
-        }
-        Ok(())
-    }
-}
-
 /// On-disk file control block stored inside directory slots.
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fcb {
-    pub file_name: [u8; 8],
-    pub ext_name: [u8; 3],
+    pub short_name: ShortName,
     pub attr: FcbAttr,
     pub ctime: u16,
     pub cdate: u16,
@@ -247,10 +147,8 @@ impl Fcb {
         start_cluster: ClusterId,
         size: u32,
     ) -> Result<Self, FsError> {
-        let encoded = encode_short_name(name)?;
         Ok(Self {
-            file_name: encoded.0,
-            ext_name: encoded.1,
+            short_name: ShortName::try_from(name)?,
             attr: kind.into(),
             ctime: 0,
             cdate: 0,
@@ -260,13 +158,7 @@ impl Fcb {
     }
 
     pub fn short_name(&self) -> String {
-        let base = decode_name_part(&self.file_name);
-        let ext = decode_name_part(&self.ext_name);
-        if ext.is_empty() {
-            base
-        } else {
-            format!("{base}.{ext}")
-        }
+        self.short_name.to_string()
     }
 
     pub fn kind(&self) -> Result<NodeKind, FsError> {
@@ -294,42 +186,6 @@ mod tests {
             NodeKind::Directory
         );
         assert!(NodeKind::try_from(FcbAttr(0x7F)).is_err());
-    }
-
-    #[test]
-    fn fs_config_validation_rejects_bad_values() {
-        assert!(
-            FsConfig {
-                block_size: 63,
-                block_count: 128
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            FsConfig {
-                block_size: 128,
-                block_count: 8
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            FsConfig {
-                block_size: 96,
-                block_count: 128
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            FsConfig {
-                block_size: 128,
-                block_count: 128
-            }
-            .validate()
-            .is_ok()
-        );
     }
 
     #[test]

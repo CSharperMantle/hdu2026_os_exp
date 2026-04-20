@@ -1,3 +1,5 @@
+//! Device abstractions.
+
 use crate::BlockId;
 
 /// Abstraction of a block I/O.
