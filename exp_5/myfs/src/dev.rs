@@ -37,16 +37,16 @@ impl BlockDevice for MemoryBlockDevice {
     }
 
     fn read_block(&self, index: BlockId) -> &[u8] {
-        &self.blocks[usize::from(index.0)]
+        &self.blocks[usize::from(u16::from(index))]
     }
 
     fn write_block(&mut self, index: BlockId, data: &[u8]) {
-        let block = &mut self.blocks[usize::from(index.0)];
+        let block = &mut self.blocks[usize::from(u16::from(index))];
         block.copy_from_slice(data);
     }
 
     fn zero_block(&mut self, index: BlockId) {
-        self.blocks[usize::from(index.0)].fill(0);
+        self.blocks[usize::from(u16::from(index))].fill(0);
     }
 }
 

@@ -1,5 +1,7 @@
 //! File system abstractions and operations.
 
+use bytemuck::Pod;
+use bytemuck::Zeroable;
 use derive_more::Deref;
 use derive_more::DerefMut;
 use derive_more::Display;
@@ -19,7 +21,21 @@ pub const ROOT_DIR_CLUSTER_COUNT: u16 = 2;
 /// TODO: Currently one cluster equals one block. Make it parametric!
 #[repr(transparent)]
 #[derive(
-    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+    Deref,
+    DerefMut,
+    Display,
+    From,
+    Into,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Zeroable,
+    Pod,
 )]
 #[display("{_0}")]
 pub struct ClusterId(pub u16);
@@ -34,12 +50,16 @@ impl ClusterId {
 
 /// The ID of a block, aka sector.
 #[repr(transparent)]
-#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod,
+)]
 #[display("{_0}")]
 pub struct BlockId(pub u16);
 
 #[repr(transparent)]
-#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod,
+)]
 #[display("{_0}")]
 pub struct FileHandle(pub u32);
 
@@ -59,7 +79,9 @@ impl fmt::Display for NodeKind {
 }
 
 #[repr(transparent)]
-#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod,
+)]
 #[display("{_0}")]
 pub struct FcbAttr(pub u8);
 
@@ -98,7 +120,7 @@ impl From<NodeKind> for FcbAttr {
 /// On-disk boot-region metadata for filesystem image.
 /// To be stored in the first block of the device.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct BootSector {
     pub block_size: u16,
     pub block_count: u16,
@@ -113,18 +135,26 @@ pub struct BootSector {
 
 pub const BOOT_SECTOR_SIZE: usize = std::mem::size_of::<BootSector>();
 
-impl From<&BootSector> for [u8; BOOT_SECTOR_SIZE] {
-    fn from(boot: &BootSector) -> Self {
-        unsafe { std::mem::transmute_copy::<BootSector, Self>(boot) }
+impl BootSector {
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+
+    pub fn read_from_prefix(bytes: &[u8]) -> Result<Self, FsError> {
+        let bytes = bytes
+            .get(..BOOT_SECTOR_SIZE)
+            .ok_or_else(|| FsError::CorruptFs("boot sector shorter than expected".to_string()))?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
     }
 }
 
 /// On-disk file control block stored inside directory slots.
 #[repr(C)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct Fcb {
     pub short_name: ShortName,
     pub attr: FcbAttr,
+    pub reserved: u8,
     pub ctime: u16,
     pub cdate: u16,
     pub start_cluster: ClusterId,
@@ -143,6 +173,7 @@ impl Fcb {
         Ok(Self {
             short_name: ShortName::try_from(name)?,
             attr: kind.into(),
+            reserved: 0,
             ctime: 0,
             cdate: 0,
             start_cluster,
@@ -157,11 +188,24 @@ impl Fcb {
     pub fn kind(&self) -> Result<NodeKind, FsError> {
         self.attr.try_into()
     }
-}
 
-impl From<&Fcb> for [u8; FCB_SIZE] {
-    fn from(fcb: &Fcb) -> Self {
-        unsafe { std::mem::transmute_copy::<Fcb, Self>(fcb) }
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+
+    pub fn write_to_slice(&self, dst: &mut [u8]) -> Result<(), FsError> {
+        let dst = dst
+            .get_mut(..FCB_SIZE)
+            .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
+        dst.copy_from_slice(self.as_bytes());
+        Ok(())
+    }
+
+    pub fn read_from_bytes(bytes: &[u8]) -> Result<Self, FsError> {
+        let bytes = bytes
+            .get(..FCB_SIZE)
+            .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
     }
 }
 

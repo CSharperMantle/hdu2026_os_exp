@@ -155,13 +155,7 @@ impl TryFrom<&[u8]> for DirSlot {
         match value[0] {
             Self::SLOT_UNUSED => Ok(DirSlot::Unused),
             Self::SLOT_DELETED => Ok(DirSlot::Deleted),
-            _ => {
-                let mut buf = [0u8; FCB_SIZE];
-                buf.copy_from_slice(&value[0..FCB_SIZE]);
-                // SAFETY: Since the size of the buffers are the same, this should not be a problem on a native-endianness system.
-                let fcb = unsafe { std::mem::transmute::<[u8; FCB_SIZE], Fcb>(buf) };
-                Ok(DirSlot::Occupied(fcb))
-            }
+            _ => Ok(DirSlot::Occupied(Fcb::read_from_bytes(value)?)),
         }
     }
 }
@@ -452,8 +446,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     fn write_boot_sector(&mut self) -> Result<(), FsError> {
         let mut block = vec![0; self.device.block_size()];
-        let boot_bytes: [u8; BOOT_SECTOR_SIZE] = (&self.boot).into();
-        block[..BOOT_SECTOR_SIZE].copy_from_slice(&boot_bytes);
+        block[..BOOT_SECTOR_SIZE].copy_from_slice(self.boot.as_bytes());
         self.device.write_block(BlockId(0), &block);
         Ok(())
     }
@@ -597,9 +590,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for copy in 0..self.boot.fat_copies {
             let start = u16::from(self.boot.fat_start_block) + copy * self.boot.fat_block_count;
             let block = BlockId::from(start + u16::try_from(block_offset).unwrap());
-            let mut data = self.device.read_block(block).to_vec();
-            data[byte_offset..byte_offset + 2].copy_from_slice(&fat_bytes);
-            self.device.write_block(block, &data);
+            self.modify_block(block, |data| {
+                data[byte_offset..byte_offset + 2].copy_from_slice(&fat_bytes);
+            });
         }
         Ok(())
     }
@@ -778,37 +771,51 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn read_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
-        let (cluster, offset) = self.slot_position(loc)?;
-        let bytes = self.read_cluster_bytes(cluster)?;
+        let (block, offset) = self.slot_position(loc)?;
+        let bytes = self.device.read_block(block);
         DirSlot::try_from(&bytes[offset..offset + FCB_SIZE])
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
-        let (cluster, offset) = self.slot_position(loc)?;
-        let mut bytes = self.read_cluster_bytes(cluster)?;
-        bytes[offset..offset + FCB_SIZE].fill(0);
-        let fcb_bytes: [u8; FCB_SIZE] = fcb.into();
-        bytes[offset..offset + FCB_SIZE].copy_from_slice(&fcb_bytes);
-        self.write_cluster_bytes(cluster, &bytes)?;
-        Ok(())
+        let (block, offset) = self.slot_position(loc)?;
+        let mut write_result = Ok(());
+        self.modify_block(block, |bytes| {
+            bytes[offset..offset + FCB_SIZE].fill(0);
+            write_result = fcb.write_to_slice(&mut bytes[offset..offset + FCB_SIZE]);
+        });
+        write_result
     }
 
     fn mark_slot_deleted(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
-        let (cluster, offset) = self.slot_position(loc)?;
-        let mut bytes = self.read_cluster_bytes(cluster)?;
-        bytes[offset..offset + FCB_SIZE].fill(0);
-        bytes[offset] = DirSlot::SLOT_DELETED;
-        self.write_cluster_bytes(cluster, &bytes)?;
+        let (block, offset) = self.slot_position(loc)?;
+        self.modify_block(block, |bytes| {
+            bytes[offset..offset + FCB_SIZE].fill(0);
+            bytes[offset] = DirSlot::SLOT_DELETED;
+        });
         Ok(())
     }
 
-    fn slot_position(&self, loc: DirEntryLoc) -> Result<(ClusterId, usize), FsError> {
+    /// Perform a read-modify-write procedure.
+    fn modify_block(&mut self, block: BlockId, f: impl FnOnce(&mut [u8])) {
+        let mut bytes = self.device.read_block(block).to_vec();
+        f(&mut bytes);
+        self.device.write_block(block, &bytes);
+    }
+
+    fn slot_position(&self, loc: DirEntryLoc) -> Result<(BlockId, usize), FsError> {
         let entries_per_cluster = self.cluster_size() / FCB_SIZE;
         let cluster_index = usize::try_from(loc.entry_index).unwrap() / entries_per_cluster;
         let slot_index = usize::try_from(loc.entry_index).unwrap() % entries_per_cluster;
         let chain = self.cluster_chain(loc.dir_start)?;
         let cluster = *chain.get(cluster_index).ok_or(FsError::NotFoundAt(loc))?;
-        Ok((cluster, slot_index * FCB_SIZE))
+        let byte_offset = slot_index * FCB_SIZE;
+        let block_offset = byte_offset / self.device.block_size();
+        let offset_in_block = byte_offset % self.device.block_size();
+        let block = *self
+            .cluster_blocks(cluster)?
+            .get(block_offset)
+            .ok_or_else(|| FsError::CorruptFs("slot offset beyond cluster blocks".to_string()))?;
+        Ok((block, offset_in_block))
     }
 
     fn find_free_dir_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {

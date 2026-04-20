@@ -1,5 +1,7 @@
 //! File name and path utilities.
 
+use bytemuck::Pod;
+use bytemuck::Zeroable;
 use derive_more::Deref;
 use derive_more::DerefMut;
 use std::fmt;
@@ -25,6 +27,11 @@ impl IsShortCompatible for char {
 #[repr(transparent)]
 #[derive(Deref, DerefMut, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpacedCharBuf<const SIZE: usize>([u8; SIZE]);
+
+// SAFETY: Wrapper is transparent over `[u8; SIZE]`, which is plain byte storage.
+unsafe impl<const SIZE: usize> Zeroable for SpacedCharBuf<SIZE> {}
+// SAFETY: Wrapper is transparent over `[u8; SIZE]`, which has no invalid bit patterns.
+unsafe impl<const SIZE: usize> Pod for SpacedCharBuf<SIZE> {}
 
 impl<const SIZE: usize> SpacedCharBuf<SIZE> {
     pub const SPACE: u8 = b' ';
@@ -111,12 +118,30 @@ impl<const SIZE: usize> TryFrom<&str> for SpacedCharBuf<SIZE> {
     }
 }
 
+/// HACK: Concrete value for [`ShortName::BASE_SIZE`].
+/// 
+/// This is to work around a quirk of rustc with `{ Self::BASE_SIZE }`:
+/// 
+/// ```plain-text
+/// error[E0433]: failed to resolve: `Self` is only available in impls, traits, and type definitions
+/// ```
+const BASE_SIZE: usize = 9;
+
+/// HACK: Concrete value for [`ShortName::EXT_SIZE`]. 
+/// 
+/// This is to work around a quirk of rustc with `{ Self::EXT_SIZE }`:
+/// 
+/// ```plain-text
+/// error[E0433]: failed to resolve: `Self` is only available in impls, traits, and type definitions
+/// ```
+const EXT_SIZE: usize = 3;
+
 /// A file name (short name) used in [`MyFileSystem`].
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct ShortName {
-    pub base: SpacedCharBuf<{ Self::BASE_SIZE }>,
-    pub ext: SpacedCharBuf<{ Self::EXT_SIZE }>,
+    pub base: SpacedCharBuf<{ BASE_SIZE }>,
+    pub ext: SpacedCharBuf<{ EXT_SIZE }>,
 }
 
 impl fmt::Display for ShortName {
@@ -160,8 +185,8 @@ impl TryFrom<&str> for ShortName {
 }
 
 impl ShortName {
-    pub const BASE_SIZE: usize = 8;
-    pub const EXT_SIZE: usize = 3;
+    pub const BASE_SIZE: usize = BASE_SIZE;
+    pub const EXT_SIZE: usize = EXT_SIZE;
 }
 
 pub(crate) fn normalize_component(component: &str) -> Result<String, FsError> {

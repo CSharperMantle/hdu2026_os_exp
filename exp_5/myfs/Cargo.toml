@@ -12,6 +12,7 @@ name = "myfs"
 path = "src/main.rs"
 
 [dependencies]
+bytemuck = { version = "1.24.0", features = ["derive"] }
 derive_more = { version = "2.1.1", features = [
     "deref",
     "deref_mut",
