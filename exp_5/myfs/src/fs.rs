@@ -1,5 +1,10 @@
 //! File system abstractions and operations.
 
+use derive_more::Deref;
+use derive_more::DerefMut;
+use derive_more::Display;
+use derive_more::From;
+use derive_more::Into;
 use std::fmt;
 
 use crate::FsError;
@@ -13,14 +18,11 @@ pub const ROOT_DIR_CLUSTER_COUNT: u16 = 2;
 /// The ID of a FAT cluster.
 /// TODO: Currently one cluster equals one block. Make it parametric!
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[display("{_0}")]
 pub struct ClusterId(pub u16);
-
-impl fmt::Display for ClusterId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 impl ClusterId {
     pub const FAT_FREE: u16 = 0x0000;
@@ -32,24 +34,14 @@ impl ClusterId {
 
 /// The ID of a block, aka sector.
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[display("{_0}")]
 pub struct BlockId(pub u16);
 
-impl fmt::Display for BlockId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[display("{_0}")]
 pub struct FileHandle(pub u32);
-
-impl fmt::Display for FileHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -67,7 +59,8 @@ impl fmt::Display for NodeKind {
 }
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq)]
+#[display("{_0}")]
 pub struct FcbAttr(pub u8);
 
 impl FcbAttr {

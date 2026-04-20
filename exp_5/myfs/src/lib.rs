@@ -20,7 +20,7 @@ pub struct DirEntryLoc {
 
 impl fmt::Display for DirEntryLoc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.dir_start.0, self.entry_index)
+        write!(f, "{}:{}", self.dir_start, self.entry_index)
     }
 }
 
@@ -252,7 +252,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
                 return Ok((loc, fcb));
             }
         }
-        Err(FsError::NotFound(format!("{}/{}", parent_dir.0, key)))
+        Err(FsError::NotFound(format!("{parent_dir}/{key}")))
     }
 
     pub fn stat(&self, loc: DirEntryLoc) -> Result<NodeMeta, FsError> {
@@ -442,8 +442,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn dump_fat(&self) -> String {
         let mut out = String::new();
-        for raw in ROOT_DIR_START_CLUSTER.0..=self.max_cluster_id().0 {
-            let cluster = ClusterId(raw);
+        for raw in u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()) {
+            let cluster = ClusterId::from(raw);
             let value = self.read_fat_entry(cluster).unwrap_or(ClusterId::FREE);
             out.push_str(&format!("{raw:>3} -> {value}\n"));
         }
@@ -461,9 +461,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn initialize_fat(&mut self) -> Result<(), FsError> {
         for block in 0..self.boot.fat_block_count {
             self.device
-                .zero_block(BlockId(self.boot.fat_start_block.0 + block));
-            self.device.zero_block(BlockId(
-                self.boot.fat_start_block.0 + self.boot.fat_block_count + block,
+                .zero_block(BlockId::from(u16::from(self.boot.fat_start_block) + block));
+            self.device.zero_block(BlockId::from(
+                u16::from(self.boot.fat_start_block) + self.boot.fat_block_count + block,
             ));
         }
         Ok(())
@@ -471,11 +471,11 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     fn reserve_root_directory(&mut self) -> Result<(), FsError> {
         for offset in 0..self.boot.root_dir_cluster_count {
-            let cluster = ClusterId(self.boot.root_dir_start_cluster.0 + offset);
+            let cluster = ClusterId::from(u16::from(self.boot.root_dir_start_cluster) + offset);
             let next = if offset + 1 == self.boot.root_dir_cluster_count {
                 ClusterId::EOC
             } else {
-                ClusterId(cluster.0 + 1)
+                ClusterId::from(u16::from(cluster) + 1)
             };
             self.write_fat_entry(cluster, next)?;
             self.zero_cluster(cluster)?;
@@ -542,43 +542,47 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn data_cluster_count(&self) -> u16 {
-        (self.boot.block_count - self.boot.data_start_block.0) / self.boot.blocks_per_cluster
+        (self.boot.block_count - u16::from(self.boot.data_start_block))
+            / self.boot.blocks_per_cluster
     }
 
     fn max_cluster_id(&self) -> ClusterId {
-        ClusterId(ROOT_DIR_START_CLUSTER.0 + self.data_cluster_count() - 1)
+        ClusterId::from(u16::from(ROOT_DIR_START_CLUSTER) + self.data_cluster_count() - 1)
     }
 
     fn cluster_blocks(&self, cluster: ClusterId) -> Result<Vec<BlockId>, FsError> {
         if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
             return Err(FsError::CorruptFs(format!(
                 "cluster {} outside data region",
-                cluster.0
+                cluster
             )));
         }
-        let first = self.boot.data_start_block.0
-            + (cluster.0 - ROOT_DIR_START_CLUSTER.0) * self.boot.blocks_per_cluster;
+        let first = u16::from(self.boot.data_start_block)
+            + (u16::from(cluster) - u16::from(ROOT_DIR_START_CLUSTER))
+                * self.boot.blocks_per_cluster;
         Ok((0..self.boot.blocks_per_cluster)
-            .map(|offset| BlockId(first + offset))
+            .map(|offset| BlockId::from(first + offset))
             .collect())
     }
 
     fn fat_offset(&self, cluster: ClusterId) -> usize {
-        usize::from(cluster.0) * 2
+        usize::from(u16::from(cluster)) * 2
     }
 
     fn read_fat_entry(&self, cluster: ClusterId) -> Result<ClusterId, FsError> {
         let offset = self.fat_offset(cluster);
         let block_offset = offset / self.device.block_size();
         let byte_offset = offset % self.device.block_size();
-        let block = BlockId(self.boot.fat_start_block.0 + u16::try_from(block_offset).unwrap());
+        let block = BlockId::from(
+            u16::from(self.boot.fat_start_block) + u16::try_from(block_offset).unwrap(),
+        );
         let bytes = self.device.read_block(block);
         if byte_offset + 2 > bytes.len() {
             return Err(FsError::CorruptFs(
                 "fat entry crosses block boundary".to_string(),
             ));
         }
-        Ok(ClusterId(u16::from_le_bytes([
+        Ok(ClusterId::from(u16::from_le_bytes([
             bytes[byte_offset],
             bytes[byte_offset + 1],
         ])))
@@ -588,11 +592,11 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let offset = self.fat_offset(cluster);
         let block_offset = offset / self.device.block_size();
         let byte_offset = offset % self.device.block_size();
-        let fat_bytes = value.0.to_le_bytes();
+        let fat_bytes = u16::from(value).to_le_bytes();
 
         for copy in 0..self.boot.fat_copies {
-            let start = self.boot.fat_start_block.0 + copy * self.boot.fat_block_count;
-            let block = BlockId(start + u16::try_from(block_offset).unwrap());
+            let start = u16::from(self.boot.fat_start_block) + copy * self.boot.fat_block_count;
+            let block = BlockId::from(start + u16::try_from(block_offset).unwrap());
             let mut data = self.device.read_block(block).to_vec();
             data[byte_offset..byte_offset + 2].copy_from_slice(&fat_bytes);
             self.device.write_block(block, &data);
@@ -615,13 +619,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
             if next == ClusterId::FREE {
                 return Err(FsError::CorruptFs(format!(
                     "cluster chain from {} reaches free entry",
-                    start.0
+                    start
                 )));
             }
             if chain.contains(&next) {
                 return Err(FsError::CorruptFs(format!(
                     "cluster loop detected at {}",
-                    next.0
+                    next
                 )));
             }
             current = next;
@@ -632,8 +636,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn allocate_clusters(&mut self, len: usize) -> Result<Vec<ClusterId>, FsError> {
         let mut out = Vec::with_capacity(len);
         for _ in 0..len {
-            let cluster = (ROOT_DIR_START_CLUSTER.0..=self.max_cluster_id().0)
-                .map(ClusterId)
+            let cluster = (u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()))
+                .map(ClusterId::from)
                 .find(|cluster| self.read_fat_entry(*cluster).ok() == Some(ClusterId::FREE))
                 .ok_or(FsError::NoSpace)?;
             self.write_fat_entry(cluster, ClusterId::EOC)?;
@@ -885,7 +889,7 @@ fn compute_fat_block_count(
     loop {
         let data_start = 1 + fat_copies * fat_blocks;
         let data_clusters = (block_count - data_start) / blocks_per_cluster;
-        let fat_entries = usize::from(ROOT_DIR_START_CLUSTER.0 + data_clusters);
+        let fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER) + data_clusters);
         let fat_bytes = fat_entries * 2;
         let needed = fat_bytes.div_ceil(usize::from(block_size)) as u16;
         if needed == fat_blocks {

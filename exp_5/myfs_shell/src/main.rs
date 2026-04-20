@@ -1,4 +1,5 @@
-use std::io::{self, Write};
+use std::io;
+use std::io::Write;
 
 use myfs::*;
 
@@ -257,12 +258,12 @@ impl Shell {
         value: Option<&&str>,
         usage: &str,
     ) -> Result<FileHandle, Box<dyn std::error::Error>> {
-        Ok(FileHandle(value.ok_or(usage)?.parse::<u32>()?))
+        Ok(value.ok_or(usage)?.parse::<u32>()?.into())
     }
 
     fn resolve_handle(&self, arg: &str) -> Result<FileHandle, Box<dyn std::error::Error>> {
         if let Ok(raw) = arg.parse::<u32>() {
-            return Ok(FileHandle(raw));
+            return Ok(raw.into());
         }
         let target = self.resolve_target(arg)?;
         let loc = target.loc().ok_or("root is not openable")?;
@@ -305,7 +306,7 @@ impl Shell {
         {
             println!(
                 "{:<4} {:>8} {:>4} {:>8} {}",
-                kind, size, start_cluster.0, loc, short_name
+                kind, size, start_cluster, loc, short_name
             );
         }
         Ok(())
@@ -315,7 +316,7 @@ impl Shell {
         println!("path: /");
         println!("type: {}", entry.kind);
         println!("size: {}", entry.size);
-        println!("start_cluster: {}", entry.start_cluster.0);
+        println!("start_cluster: {}", entry.start_cluster);
     }
 
     fn print_stat(&self, path: &str, entry: &myfs::NodeMeta) {
@@ -326,7 +327,7 @@ impl Shell {
         println!("name: {}", entry.short_name);
         println!("type: {}", entry.kind);
         println!("size: {}", entry.size);
-        println!("start_cluster: {}", entry.start_cluster.0);
+        println!("start_cluster: {}", entry.start_cluster);
         println!("ctime: {}", entry.ctime);
         println!("cdate: {}", entry.cdate);
     }
@@ -347,11 +348,11 @@ impl Shell {
         {
             println!(
                 "#{:<3} loc={} cursor={:<6} size={:<8} cluster={:<4} name={}",
-                handle.0,
+                handle,
                 loc,
                 cursor,
                 fcb.size,
-                fcb.start_cluster.0,
+                fcb.start_cluster,
                 fcb.short_name()
             );
         }
