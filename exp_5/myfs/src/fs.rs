@@ -235,4 +235,35 @@ mod tests {
         assert_eq!(fcb.size, 0);
         assert_eq!(fcb.short_name(), "A.TXT");
     }
+
+    #[test]
+    fn boot_sector_bytes_round_trip() {
+        let boot = BootSector {
+            block_size: 1024,
+            block_count: 128,
+            blocks_per_cluster: 1,
+            fat_start_block: BlockId(1),
+            fat_block_count: 1,
+            fat_copies: 2,
+            data_start_block: BlockId(3),
+            root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
+            root_dir_cluster_count: ROOT_DIR_CLUSTER_COUNT,
+        };
+        assert_eq!(boot.as_bytes().len(), BOOT_SECTOR_SIZE);
+        assert_eq!(BootSector::read_from_prefix(boot.as_bytes()).unwrap(), boot);
+    }
+
+    #[test]
+    fn fcb_bytes_round_trip() {
+        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId(7), 123).unwrap();
+        assert_eq!(fcb.as_bytes().len(), FCB_SIZE);
+        assert_eq!(Fcb::read_from_bytes(fcb.as_bytes()).unwrap(), fcb);
+    }
+
+    #[test]
+    fn write_to_slice_rejects_short_buffer() {
+        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0).unwrap();
+        let mut short = [0u8; FCB_SIZE - 1];
+        assert!(fcb.write_to_slice(&mut short).is_err());
+    }
 }
