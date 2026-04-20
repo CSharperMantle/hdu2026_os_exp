@@ -1110,6 +1110,11 @@ mod tests {
     }
 
     #[test]
+    fn fat_block_count_computation_does_not_oscillate() {
+        assert_eq!(get_fat_block_count(128, 256, 2, 4), 2);
+    }
+
+    #[test]
     fn node_oriented_api_resolves_and_stats() {
         let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
