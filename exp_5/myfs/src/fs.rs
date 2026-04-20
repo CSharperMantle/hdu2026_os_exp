@@ -14,6 +14,8 @@ use crate::ShortName;
 
 pub const DEFAULT_BLOCK_SIZE: usize = 1024;
 pub const DEFAULT_BLOCK_COUNT: u16 = 128;
+pub const DEFAULT_BLOCKS_PER_CLUSTER: u16 = 1;
+pub const MAX_BLOCK_SIZE: usize = 1024;
 pub const ROOT_DIR_START_CLUSTER: ClusterId = ClusterId(2);
 pub const ROOT_DIR_CLUSTER_COUNT: u16 = 2;
 
@@ -118,7 +120,9 @@ impl From<NodeKind> for FcbAttr {
 }
 
 /// On-disk boot-region metadata for filesystem image.
-/// To be stored in the first block of the device.
+///
+/// Stored at the beginning of reserved sector 0. This record is a prefix of the first block, not
+/// a whole-block object.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct BootSector {
@@ -134,6 +138,7 @@ pub struct BootSector {
 }
 
 pub const BOOT_SECTOR_SIZE: usize = std::mem::size_of::<BootSector>();
+const _: () = assert!(BOOT_SECTOR_SIZE <= MAX_BLOCK_SIZE);
 
 impl BootSector {
     pub fn as_bytes(&self) -> &[u8] {

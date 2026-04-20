@@ -73,6 +73,7 @@ impl error::Error for FsError {}
 pub struct FsConfig {
     pub block_size: u16,
     pub block_count: u16,
+    pub blocks_per_cluster: u16,
 }
 
 impl Default for FsConfig {
@@ -80,6 +81,7 @@ impl Default for FsConfig {
         Self {
             block_size: DEFAULT_BLOCK_SIZE as u16,
             block_count: DEFAULT_BLOCK_COUNT,
+            blocks_per_cluster: DEFAULT_BLOCKS_PER_CLUSTER,
         }
     }
 }
@@ -108,6 +110,18 @@ impl FsConfig {
             return Err(FsError::InvalidConfig(format!(
                 "block size {} must be a multiple of 64",
                 self.block_size
+            )));
+        }
+        if self.blocks_per_cluster == 0 {
+            return Err(FsError::InvalidConfig(
+                "blocks per cluster must be at least 1".to_string(),
+            ));
+        }
+        let min_blocks = 1 + 2 + self.blocks_per_cluster * ROOT_DIR_CLUSTER_COUNT;
+        if self.block_count <= min_blocks {
+            return Err(FsError::InvalidConfig(format!(
+                "block count {} is too small for geometry",
+                self.block_count
             )));
         }
         Ok(())
@@ -186,11 +200,16 @@ impl MyFileSystem<MemoryBlockDevice> {
     pub fn format_memory(config: FsConfig) -> Result<Self, FsError> {
         config.validate()?;
 
-        let fat_block_count = compute_fat_block_count(config.block_size, config.block_count, 2, 1);
+        let fat_block_count = get_fat_block_count(
+            config.block_size,
+            config.block_count,
+            2,
+            config.blocks_per_cluster,
+        );
         let boot = BootSector {
             block_size: config.block_size,
             block_count: config.block_count,
-            blocks_per_cluster: 1,
+            blocks_per_cluster: config.blocks_per_cluster,
             fat_start_block: BlockId(1),
             fat_block_count,
             fat_copies: 2,
@@ -886,7 +905,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 }
 
-fn compute_fat_block_count(
+fn get_fat_block_count(
     block_size: u16,
     block_count: u16,
     fat_copies: u16,
@@ -895,6 +914,9 @@ fn compute_fat_block_count(
     let mut fat_blocks = 1u16;
     loop {
         let data_start = 1 + fat_copies * fat_blocks;
+        if data_start >= block_count {
+            return fat_blocks;
+        }
         let data_clusters = (block_count - data_start) / blocks_per_cluster;
         let fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER) + data_clusters);
         let fat_bytes = fat_entries * 2;
@@ -936,7 +958,7 @@ mod tests {
         assert!(
             FsConfig {
                 block_size: 63,
-                block_count: 128
+                block_count: 128,
             }
             .validate()
             .is_err()
@@ -944,7 +966,7 @@ mod tests {
         assert!(
             FsConfig {
                 block_size: 128,
-                block_count: 8
+                block_count: 8,
             }
             .validate()
             .is_err()
@@ -952,15 +974,7 @@ mod tests {
         assert!(
             FsConfig {
                 block_size: 96,
-                block_count: 128
-            }
-            .validate()
-            .is_err()
-        );
-        assert!(
-            FsConfig {
-                block_size: 128,
-                block_count: 128
+                block_count: 128,
             }
             .validate()
             .is_ok()
