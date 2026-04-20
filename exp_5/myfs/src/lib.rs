@@ -959,6 +959,7 @@ mod tests {
             FsConfig {
                 block_size: 63,
                 block_count: 128,
+                blocks_per_cluster: 1,
             }
             .validate()
             .is_err()
@@ -967,6 +968,7 @@ mod tests {
             FsConfig {
                 block_size: 128,
                 block_count: 8,
+                blocks_per_cluster: 1,
             }
             .validate()
             .is_err()
@@ -975,6 +977,25 @@ mod tests {
             FsConfig {
                 block_size: 96,
                 block_count: 128,
+                blocks_per_cluster: 1,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FsConfig {
+                block_size: 128,
+                block_count: 128,
+                blocks_per_cluster: 0,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            FsConfig {
+                block_size: 128,
+                block_count: 128,
+                blocks_per_cluster: 16,
             }
             .validate()
             .is_ok()
@@ -998,6 +1019,19 @@ mod tests {
             ClusterId(3)
         );
         assert_eq!(fs.read_fat_entry(ClusterId(3)).unwrap(), ClusterId::EOC);
+    }
+
+    #[test]
+    fn format_respects_blocks_per_cluster() {
+        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 128,
+            block_count: 256,
+            blocks_per_cluster: 4,
+        })
+        .unwrap();
+        assert_eq!(fs.boot.blocks_per_cluster, 4);
+        assert_eq!(fs.cluster_size(), 512);
+        assert_eq!(fs.cluster_blocks(ROOT_DIR_START_CLUSTER).unwrap().len(), 4);
     }
 
     #[test]
