@@ -1015,6 +1015,52 @@ mod tests {
     }
 
     #[test]
+    fn packed_fcb_slots_can_cross_block_boundaries() {
+        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 256,
+            blocks_per_cluster: 2,
+        })
+        .unwrap();
+
+        let a = fs.create_file(fs.root_dir_cluster(), "A.TXT").unwrap();
+        let b = fs.create_file(fs.root_dir_cluster(), "B.TXT").unwrap();
+        let c = fs.create_file(fs.root_dir_cluster(), "C.TXT").unwrap();
+        let d = fs.create_file(fs.root_dir_cluster(), "D.TXT").unwrap();
+
+        assert_eq!(a.entry_index, 0);
+        assert_eq!(b.entry_index, 1);
+        assert_eq!(c.entry_index, 2);
+        assert_eq!(d.entry_index, 3);
+
+        assert_eq!(fs.read_fcb_at(d).unwrap().short_name(), "D.TXT");
+        let names = fs
+            .list_dir(fs.root_dir_cluster())
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.short_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["A.TXT", "B.TXT", "C.TXT", "D.TXT"]);
+    }
+
+    #[test]
+    fn io_works_with_multi_block_clusters() {
+        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 128,
+            block_count: 256,
+            blocks_per_cluster: 4,
+        })
+        .unwrap();
+
+        let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
+        let handle = fs.open(file_loc).unwrap();
+        let payload = vec![0xCD; fs.cluster_size() + 37];
+        assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
+        fs.seek(handle, 0).unwrap();
+        assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);
+    }
+
+    #[test]
     fn creates_lists_and_removes_directories() {
         let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
