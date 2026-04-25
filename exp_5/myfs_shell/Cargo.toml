@@ -5,4 +5,5 @@ edition = "2024"
 license = "Apache-2.0 AND CC-BY-SA-4.0"
 
 [dependencies]
+anyhow = "1.0.102"
 myfs = { path = "../myfs" }

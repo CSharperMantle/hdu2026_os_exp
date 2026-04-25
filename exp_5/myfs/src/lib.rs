@@ -12,54 +12,45 @@ pub use name::*;
 
 use chrono::Utc;
 use std::collections::HashSet;
-use std::error;
 use std::fmt;
+use thiserror::Error;
 
 pub const MAX_OPEN_FILES: usize = 10;
 
 /// Error type for [`MyFileSystem`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FsError {
+    #[error("invalid config: {0}")]
     InvalidConfig(String),
+    #[error("invalid name: {0}")]
     InvalidName(String),
+    #[error("invalid path: {0}")]
     InvalidPath(String),
+    #[error("not found: {0}")]
     NotFound(String),
+    #[error("not found at dir entry: {0}")]
     NotFoundAt(DirEntryLoc),
+    #[error("not a directory: {0}")]
     NotADirectory(String),
+    #[error("is a directory: {0}")]
     IsADirectory(String),
+    #[error("directory not empty: {0}")]
     DirectoryNotEmpty(String),
+    #[error("filesystem is full")]
     NoSpace,
+    #[error("too many opened files")]
     TooManyOpenFiles,
+    #[error("file already open: {0}")]
     AlreadyOpen(DirEntryLoc),
+    #[error("file is open: {0}")]
     FileOpen(DirEntryLoc),
+    #[error("invalid handle: {0}")]
     InvalidHandle(FileHandle),
+    #[error("seek out of bounds: {0}")]
     SeekOutOfBounds(usize),
+    #[error("corrupt filesystem: {0}")]
     CorruptFs(String),
 }
-
-impl fmt::Display for FsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FsError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
-            FsError::InvalidName(name) => write!(f, "invalid 8.3 name: {name}"),
-            FsError::InvalidPath(path) => write!(f, "invalid path: {path}"),
-            FsError::NotFound(name) => write!(f, "not found: {name}"),
-            FsError::NotFoundAt(loc) => write!(f, "not found at dir entry: {loc}"),
-            FsError::NotADirectory(name) => write!(f, "not a directory: {name}"),
-            FsError::IsADirectory(name) => write!(f, "is a directory: {name}"),
-            FsError::DirectoryNotEmpty(name) => write!(f, "directory not empty: {name}"),
-            FsError::NoSpace => write!(f, "filesystem is full"),
-            FsError::TooManyOpenFiles => write!(f, "too many opened files"),
-            FsError::AlreadyOpen(loc) => write!(f, "file already open: {loc}"),
-            FsError::FileOpen(loc) => write!(f, "file is open: {loc}"),
-            FsError::InvalidHandle(handle) => write!(f, "invalid handle: {handle}"),
-            FsError::SeekOutOfBounds(pos) => write!(f, "seek out of bounds: {pos}"),
-            FsError::CorruptFs(msg) => write!(f, "corrupt filesystem: {msg}"),
-        }
-    }
-}
-
-impl error::Error for FsError {}
 
 /// Location of a directory entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

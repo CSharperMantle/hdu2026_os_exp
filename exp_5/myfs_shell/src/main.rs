@@ -1,3 +1,5 @@
+use anyhow::Result;
+use anyhow::anyhow;
 use std::io;
 use std::io::Write;
 
@@ -18,7 +20,7 @@ struct Shell {
 }
 
 impl Shell {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    fn new() -> Result<Self> {
         let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())?;
         Ok(Self {
             cwd_cluster: fs.root_dir_cluster(),
@@ -53,16 +55,13 @@ impl Shell {
         Ok(())
     }
 
-    fn execute(
-        &mut self,
-        line: &str,
-        stdin: &io::Stdin,
-    ) -> Result<ControlFlow, Box<dyn std::error::Error>> {
+    fn execute(&mut self, line: &str, stdin: &io::Stdin) -> Result<ControlFlow> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         match parts[0] {
             "pwd" => println!("{}", self.cwd_path),
             "cd" => {
-                let target = self.resolve_target(parts.get(1).ok_or("usage: cd <path>")?)?;
+                let target =
+                    self.resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: cd <path>"))?)?;
                 match target {
                     ResolvedTarget::Root { path } => {
                         self.cwd_cluster = self.fs.root_dir_cluster();
@@ -70,7 +69,7 @@ impl Shell {
                     }
                     ResolvedTarget::Entry { fcb, path, .. } => {
                         if fcb.kind()? != NodeKind::Directory {
-                            return Err("target is not directory".into());
+                            return Err(anyhow!("target is not directory"));
                         }
                         self.cwd_cluster = fcb.start_cluster;
                         self.cwd_path = path;
@@ -89,28 +88,41 @@ impl Shell {
                 self.print_dir(target_cluster)?;
             }
             "mkdir" => {
-                let (parent_cluster, name) =
-                    self.resolve_parent_and_name(parts.get(1).ok_or("usage: mkdir <path>")?)?;
+                let (parent_cluster, name) = self.resolve_parent_and_name(
+                    parts.get(1).ok_or_else(|| anyhow!("usage: mkdir <path>"))?,
+                )?;
                 self.fs.mkdir(parent_cluster, &name)?;
             }
             "rmdir" => {
-                let target = self.resolve_target(parts.get(1).ok_or("usage: rmdir <path>")?)?;
-                let loc = target.loc().ok_or("cannot remove root directory")?;
+                let target = self
+                    .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: rmdir <path>"))?)?;
+                let loc = target
+                    .loc()
+                    .ok_or_else(|| anyhow!("cannot remove root directory"))?;
                 self.fs.rmdir(loc)?;
             }
             "create" => {
-                let (parent_cluster, name) =
-                    self.resolve_parent_and_name(parts.get(1).ok_or("usage: create <path>")?)?;
+                let (parent_cluster, name) = self.resolve_parent_and_name(
+                    parts
+                        .get(1)
+                        .ok_or_else(|| anyhow!("usage: create <path>"))?,
+                )?;
                 self.fs.create_file(parent_cluster, &name)?;
             }
             "rm" => {
-                let target = self.resolve_target(parts.get(1).ok_or("usage: rm <path>")?)?;
-                let loc = target.loc().ok_or("cannot remove root directory")?;
+                let target =
+                    self.resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: rm <path>"))?)?;
+                let loc = target
+                    .loc()
+                    .ok_or_else(|| anyhow!("cannot remove root directory"))?;
                 self.fs.remove_file(loc)?;
             }
             "open" => {
-                let target = self.resolve_target(parts.get(1).ok_or("usage: open <path>")?)?;
-                let loc = target.loc().ok_or("cannot open root directory")?;
+                let target = self
+                    .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: open <path>"))?)?;
+                let loc = target
+                    .loc()
+                    .ok_or_else(|| anyhow!("cannot open root directory"))?;
                 let handle = self.fs.open(loc)?;
                 println!("handle {handle}");
             }
@@ -139,13 +151,14 @@ impl Shell {
                 let handle = self.parse_handle(parts.get(1), "usage: seek <handle> <offset>")?;
                 let offset = parts
                     .get(2)
-                    .ok_or("usage: seek <handle> <offset>")?
+                    .ok_or_else(|| anyhow!("usage: seek <handle> <offset>"))?
                     .parse::<usize>()?;
                 self.fs.seek(handle, offset)?;
             }
             "fat" => print!("{}", self.fs.dump_fat()),
             "stat" => {
-                let target = self.resolve_target(parts.get(1).ok_or("usage: stat <path>")?)?;
+                let target = self
+                    .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: stat <path>"))?)?;
                 match target {
                     ResolvedTarget::Root { .. } => {
                         let entry = self.fs.stat_root()?;
@@ -160,12 +173,12 @@ impl Shell {
             "openfiles" => self.print_open_files(),
             "help" => print!("{}", HELP),
             "exit" | "quit" => return Ok(ControlFlow::Exit),
-            _ => return Err(format!("unknown command: {}", parts[0]).into()),
+            _ => return Err(anyhow!("unknown command: {}", parts[0])),
         }
         Ok(ControlFlow::Continue)
     }
 
-    fn resolve_target(&self, raw: &str) -> Result<ResolvedTarget, Box<dyn std::error::Error>> {
+    fn resolve_target(&self, raw: &str) -> Result<ResolvedTarget> {
         let canonical = self.canonicalize_path(raw)?;
         if canonical == "/" {
             return Ok(ResolvedTarget::Root { path: canonical });
@@ -187,9 +200,9 @@ impl Shell {
         })
     }
 
-    fn canonicalize_path(&self, raw: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn canonicalize_path(&self, raw: &str) -> Result<String> {
         if raw.is_empty() {
-            return Err("empty path".into());
+            return Err(anyhow!("empty path"));
         }
 
         let joined = if raw.starts_with('/') {
@@ -219,13 +232,10 @@ impl Shell {
         }
     }
 
-    fn resolve_parent_and_name(
-        &self,
-        raw: &str,
-    ) -> Result<(ClusterId, String), Box<dyn std::error::Error>> {
+    fn resolve_parent_and_name(&self, raw: &str) -> Result<(ClusterId, String)> {
         let canonical = self.canonicalize_path(raw)?;
         if canonical == "/" {
-            return Err("invalid path".into());
+            return Err(anyhow!("invalid path"));
         }
         let (parent_path, name) = canonical.rsplit_once('/').map_or(
             ("/", canonical.trim_start_matches('/')),
@@ -238,13 +248,13 @@ impl Shell {
             },
         );
         if name.is_empty() {
-            return Err("invalid path".into());
+            return Err(anyhow!("invalid path"));
         }
         let parent_cluster = match self.resolve_target(parent_path)? {
             ResolvedTarget::Root { .. } => self.fs.root_dir_cluster(),
             ResolvedTarget::Entry { fcb, .. } => {
                 if fcb.kind()? != NodeKind::Directory {
-                    return Err("parent is not directory".into());
+                    return Err(anyhow!("parent is not directory"));
                 }
                 fcb.start_cluster
             }
@@ -252,18 +262,14 @@ impl Shell {
         Ok((parent_cluster, name.to_string()))
     }
 
-    fn parse_handle(
-        &self,
-        value: Option<&&str>,
-        usage: &str,
-    ) -> Result<FileHandle, Box<dyn std::error::Error>> {
-        Ok(value.ok_or(usage)?.parse::<u32>()?.into())
+    fn parse_handle(&self, value: Option<&&str>, usage: &str) -> Result<FileHandle> {
+        Ok(value
+            .ok_or_else(|| anyhow!("{usage}"))?
+            .parse::<u32>()?
+            .into())
     }
 
-    fn read_interactive_payload(
-        &self,
-        stdin: &io::Stdin,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn read_interactive_payload(&self, stdin: &io::Stdin) -> Result<String> {
         println!("enter text, finish with single `.` line:");
         let mut out = String::new();
         loop {
@@ -277,7 +283,7 @@ impl Shell {
         Ok(out)
     }
 
-    fn print_dir(&self, dir_start: ClusterId) -> Result<(), Box<dyn std::error::Error>> {
+    fn print_dir(&self, dir_start: ClusterId) -> Result<()> {
         for entry in self.fs.list_dir(dir_start)? {
             println!(
                 "{:<4} {:>8} {:>4} {:>8} {}",
@@ -353,12 +359,12 @@ impl ResolvedTarget {
         }
     }
 
-    fn as_dir_cluster(&self) -> Result<ClusterId, Box<dyn std::error::Error>> {
+    fn as_dir_cluster(&self) -> Result<ClusterId> {
         match self {
-            ResolvedTarget::Root { .. } => Err("target is root, handle separately".into()),
+            ResolvedTarget::Root { .. } => Err(anyhow!("target is root, handle separately")),
             ResolvedTarget::Entry { fcb, .. } => {
                 if fcb.kind()? != NodeKind::Directory {
-                    return Err("target is not directory".into());
+                    return Err(anyhow!("target is not directory"));
                 }
                 Ok(fcb.start_cluster)
             }
