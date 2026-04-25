@@ -132,27 +132,14 @@ impl Default for FsConfig {
 
 impl FsConfig {
     pub fn validate(&self) -> Result<(), FsError> {
-        if !(64..=1024).contains(&self.block_size) {
-            return Err(FsError::InvalidConfig(format!(
-                "block size {} must be between 64 and 1024",
-                self.block_size
-            )));
+        if self.block_size == 0 {
+            return Err(FsError::InvalidConfig(
+                "block size must be at least 1".to_string(),
+            ));
         }
         if (self.block_size as usize) < std::mem::size_of::<BootSector>() {
             return Err(FsError::InvalidConfig(format!(
                 "boot sector does not fit in block size {}",
-                self.block_size
-            )));
-        }
-        if self.block_count <= 8 {
-            return Err(FsError::InvalidConfig(format!(
-                "block count {} is too small",
-                self.block_count
-            )));
-        }
-        if !self.block_size.is_multiple_of(64) {
-            return Err(FsError::InvalidConfig(format!(
-                "block size {} must be a multiple of 64",
                 self.block_size
             )));
         }
@@ -161,12 +148,51 @@ impl FsConfig {
                 "blocks per cluster must be at least 1".to_string(),
             ));
         }
-        let min_blocks = 1 + 2 + self.blocks_per_cluster;
-        if self.block_count <= min_blocks {
+        let cluster_size =
+            usize::from(self.block_size).saturating_mul(usize::from(self.blocks_per_cluster));
+        if cluster_size < Fcb::SIZE {
+            return Err(FsError::InvalidConfig(format!(
+                "cluster size {} smaller than directory entry size {}",
+                cluster_size,
+                Fcb::SIZE
+            )));
+        }
+
+        let fat_block_count = get_fat_block_count(
+            self.block_size,
+            self.block_count,
+            2,
+            self.blocks_per_cluster,
+        );
+        let data_start = 1u32 + 2u32 * u32::from(fat_block_count);
+        if data_start >= u32::from(self.block_count) {
             return Err(FsError::InvalidConfig(format!(
                 "block count {} is too small for geometry",
                 self.block_count
             )));
+        }
+        let data_blocks = u32::from(self.block_count) - data_start;
+        if data_blocks < u32::from(self.blocks_per_cluster) {
+            return Err(FsError::InvalidConfig(
+                "geometry does not leave one full root directory cluster".to_string(),
+            ));
+        }
+
+        let data_clusters = data_blocks / u32::from(self.blocks_per_cluster);
+        let max_cluster_id = u32::from(u16::from(ROOT_DIR_START_CLUSTER)) + data_clusters - 1;
+        if max_cluster_id > u32::from(u16::MAX) {
+            return Err(FsError::InvalidConfig(
+                "geometry exceeds 16-bit cluster id range".to_string(),
+            ));
+        }
+
+        let fat_entries = fat_entry_count(self.block_size, fat_block_count);
+        let needed_fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER))
+            + usize::try_from(data_clusters).unwrap();
+        if fat_entries < needed_fat_entries {
+            return Err(FsError::InvalidConfig(
+                "fat region cannot address all data clusters".to_string(),
+            ));
         }
         Ok(())
     }
@@ -315,11 +341,7 @@ impl MyFileSystem<MemoryBlockDevice> {
                 usize::from(config.block_count),
             ),
             boot,
-            fat_m: vec![
-                FatEntry::Free;
-                usize::from(config.block_size) * usize::from(fat_block_count)
-                    / FatEntry::SIZE
-            ],
+            fat_m: vec![FatEntry::Free; fat_entry_count(config.block_size, fat_block_count)],
             fat_dirty: false,
             open_files: std::array::from_fn(|_| None),
             next_handle: 1,
@@ -605,19 +627,19 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn write_boot_sector(&mut self) -> Result<(), FsError> {
-        let mut block = vec![0; self.device.block_size()];
+        let mut block = vec![0; usize::from(self.boot.block_size)];
         block[..BOOT_SECTOR_SIZE].copy_from_slice(self.boot.as_bytes());
         self.device.write_block(BlockId(0), &block);
         Ok(())
     }
 
     fn init_fat(&mut self) -> Result<(), FsError> {
-        for block in 0..self.boot.fat_block_count {
-            self.device
-                .zero_block(BlockId::from(u16::from(self.boot.fat_start_block) + block));
-            self.device.zero_block(BlockId::from(
-                u16::from(self.boot.fat_start_block) + self.boot.fat_block_count + block,
-            ));
+        for copy in 0..self.boot.fat_copies {
+            let start = self.fat_start_block_of(copy);
+            for block in 0..self.boot.fat_block_count {
+                self.device
+                    .zero_block(BlockId::from(u16::from(start) + block));
+            }
         }
         Ok(())
     }
@@ -698,8 +720,26 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
+    /// Cluster size in bytes.
     fn cluster_size(&self) -> usize {
         usize::from(self.boot.block_size) * usize::from(self.boot.blocks_per_cluster)
+    }
+
+    fn fat_start_block_of(&self, copy_idx: u16) -> BlockId {
+        BlockId::from(u16::from(self.boot.fat_start_block) + copy_idx * self.boot.fat_block_count)
+    }
+
+    fn cluster_first_block(&self, cluster: ClusterId) -> Result<BlockId, FsError> {
+        if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
+            return Err(FsError::CorruptFs(format!(
+                "cluster {} outside data region",
+                cluster
+            )));
+        }
+        let first = u16::from(self.boot.data_start_block)
+            + (u16::from(cluster) - u16::from(ROOT_DIR_START_CLUSTER))
+                * self.boot.blocks_per_cluster;
+        Ok(BlockId::from(first))
     }
 
     fn data_cluster_count(&self) -> u16 {
@@ -712,21 +752,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn cluster_blocks(&self, cluster: ClusterId) -> Result<Vec<BlockId>, FsError> {
-        if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
-            return Err(FsError::CorruptFs(format!(
-                "cluster {} outside data region",
-                cluster
-            )));
-        }
-        let first = u16::from(self.boot.data_start_block)
-            + (u16::from(cluster) - u16::from(ROOT_DIR_START_CLUSTER))
-                * self.boot.blocks_per_cluster;
+        let first = self.cluster_first_block(cluster)?;
         Ok((0..self.boot.blocks_per_cluster)
-            .map(|offset| BlockId::from(first + offset))
+            .map(|offset| BlockId::from(u16::from(first) + offset))
             .collect())
     }
 
-    /// Get position of a cluster in the
+    /// Get FAT block position of one cluster entry.
     fn fat_pos_of(&self, cluster: ClusterId) -> Result<(usize, usize), FsError> {
         if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
             return Err(FsError::CorruptFs(format!(
@@ -735,14 +767,19 @@ impl<D: BlockDevice> MyFileSystem<D> {
             )));
         }
         let offset = fat_offset(cluster);
-        let block_offset = offset / self.device.block_size();
-        let byte_offset = offset % self.device.block_size();
+        let block_offset = offset / usize::from(self.boot.block_size);
+        let byte_offset = offset % usize::from(self.boot.block_size);
         Ok((block_offset, byte_offset))
     }
 
     fn read_fat(&self, cluster: ClusterId) -> Result<FatEntry, FsError> {
         // Assert position sanity
         let _ = self.fat_pos_of(cluster)?;
+        if self.fat_m.len() != fat_entry_count(self.boot.block_size, self.boot.fat_block_count) {
+            return Err(FsError::CorruptFs(
+                "fat cache size does not match geometry".to_string(),
+            ));
+        }
         self.fat_m
             .get(usize::from(u16::from(cluster)))
             .copied()
@@ -758,7 +795,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn flush_fat(&mut self, copy_idx: u16) -> Result<(), FsError> {
-        let mut bytes = vec![0; usize::from(self.boot.fat_block_count) * self.device.block_size()];
+        let mut bytes =
+            vec![0; usize::from(self.boot.fat_block_count) * usize::from(self.boot.block_size)];
         for (index, entry) in self.fat_m.iter().copied().enumerate() {
             let start = index * FatEntry::SIZE;
             let end = start + FatEntry::SIZE;
@@ -769,13 +807,12 @@ impl<D: BlockDevice> MyFileSystem<D> {
             }
             bytes[start..end].copy_from_slice(&u16::from(entry).to_le_bytes());
         }
-        let start_block =
-            u16::from(self.boot.fat_start_block) + copy_idx * self.boot.fat_block_count;
+        let start_block = self.fat_start_block_of(copy_idx);
         for block_offset in 0..usize::from(self.boot.fat_block_count) {
-            let start = block_offset * self.device.block_size();
-            let end = start + self.device.block_size();
+            let start = block_offset * usize::from(self.boot.block_size);
+            let end = start + usize::from(self.boot.block_size);
             self.device.write_block(
-                BlockId::from(start_block + u16::try_from(block_offset).unwrap()),
+                BlockId::from(u16::from(start_block) + u16::try_from(block_offset).unwrap()),
                 &bytes[start..end],
             );
         }
@@ -1155,12 +1192,13 @@ fn get_fat_block_count(
 ) -> u16 {
     let mut fat_blocks = 1u16;
     loop {
-        let data_start = 1 + fat_copies * fat_blocks;
-        if data_start >= block_count {
+        let data_start = 1u32 + u32::from(fat_copies) * u32::from(fat_blocks);
+        if data_start >= u32::from(block_count) {
             return fat_blocks;
         }
-        let data_clusters = (block_count - data_start) / blocks_per_cluster;
-        let fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER) + data_clusters);
+        let data_clusters = (u32::from(block_count) - data_start) / u32::from(blocks_per_cluster);
+        let fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER))
+            + usize::try_from(data_clusters).unwrap();
         let fat_bytes = fat_entries * 2;
         let needed = fat_bytes.div_ceil(usize::from(block_size)) as u16;
         if needed <= fat_blocks {
@@ -1168,6 +1206,10 @@ fn get_fat_block_count(
         }
         fat_blocks = needed;
     }
+}
+
+fn fat_entry_count(block_size: u16, fat_block_count: u16) -> usize {
+    usize::from(block_size) * usize::from(fat_block_count) / FatEntry::SIZE
 }
 
 #[cfg(test)]
@@ -1211,7 +1253,7 @@ mod tests {
     fn fs_config_validation_rejects_bad_values() {
         assert!(
             FsConfig {
-                block_size: 63,
+                block_size: 8,
                 block_count: 128,
                 blocks_per_cluster: 1,
             }
@@ -1221,7 +1263,7 @@ mod tests {
         assert!(
             FsConfig {
                 block_size: 128,
-                block_count: 8,
+                block_count: 2,
                 blocks_per_cluster: 1,
             }
             .validate()
@@ -1229,7 +1271,7 @@ mod tests {
         );
         assert!(
             FsConfig {
-                block_size: 96,
+                block_size: 16,
                 block_count: 128,
                 blocks_per_cluster: 1,
             }
@@ -1250,6 +1292,15 @@ mod tests {
                 block_size: 128,
                 block_count: 128,
                 blocks_per_cluster: 16,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            FsConfig {
+                block_size: 96,
+                block_count: 128,
+                blocks_per_cluster: 1,
             }
             .validate()
             .is_ok()
@@ -1286,6 +1337,29 @@ mod tests {
         assert_eq!(fs.boot.blocks_per_cluster, 4);
         assert_eq!(fs.cluster_size(), 512);
         assert_eq!(fs.cluster_blocks(ROOT_DIR_START_CLUSTER).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn format_accepts_large_non_default_block_size() {
+        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 1536,
+            block_count: 128,
+            blocks_per_cluster: 2,
+        })
+        .unwrap();
+        assert_eq!(fs.boot.block_size, 1536);
+        assert_eq!(usize::from(fs.boot.block_size), 1536);
+        assert_eq!(fs.cluster_size(), 3072);
+    }
+
+    #[test]
+    fn format_rejects_cluster_smaller_than_one_fcb() {
+        let result = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 16,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        });
+        assert!(matches!(result, Err(FsError::InvalidConfig(_))));
     }
 
     #[test]
@@ -1377,6 +1451,23 @@ mod tests {
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = vec![0xCD; fs.cluster_size() + 37];
+        assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
+        fs.seek(handle, 0).unwrap();
+        assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);
+    }
+
+    #[test]
+    fn io_works_with_large_blocks_and_clusters() {
+        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 1536,
+            block_count: 128,
+            blocks_per_cluster: 8,
+        })
+        .unwrap();
+
+        let file_loc = fs.create_file(fs.root_dir_cluster(), "BIG.BIN").unwrap();
+        let handle = fs.open(file_loc).unwrap();
+        let payload = vec![0x5A; fs.cluster_size() * 2 + 11];
         assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
         fs.seek(handle, 0).unwrap();
         assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);

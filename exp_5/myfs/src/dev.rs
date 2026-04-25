@@ -2,7 +2,11 @@
 
 use crate::BlockId;
 
-/// Abstraction of a block I/O.
+/// Abstraction of logical block I/O.
+///
+/// FIXME: The current filesystem treats one logical block as one sector.
+/// A later non-RAM device should preserve this logical-block contract even
+/// if its physical access granularity differs.
 pub trait BlockDevice {
     fn block_size(&self) -> usize;
     fn block_count(&self) -> usize;
@@ -11,7 +15,7 @@ pub trait BlockDevice {
     fn zero_block(&mut self, index: BlockId);
 }
 
-/// RAM-backed block device.
+/// RAM-backed device implementing the logical-block interface.
 #[derive(Debug)]
 pub struct MemoryBlockDevice {
     block_size: usize,
