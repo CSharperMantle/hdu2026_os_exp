@@ -26,6 +26,8 @@ env_logger = "0.11.10"
 libc = "0.2.177"
 log = "0.4.29"
 thiserror = "2.0.18"
+clap = { version = "4.6.1", features = ["derive"] }
+anyhow = "1.0.102"
 
 [dev-dependencies]
 tempfile = "3.27.0"

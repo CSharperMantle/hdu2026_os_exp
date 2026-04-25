@@ -1,20 +1,22 @@
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::format_err;
 use chrono::DateTime;
 use chrono::NaiveDate;
 use chrono::NaiveDateTime;
 use chrono::NaiveTime;
 use chrono::Utc;
+use clap::Parser;
 use fuser::*;
 use log::debug;
 use log::warn;
 use myfs::*;
 use std::convert::TryFrom;
-use std::env;
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::time::Duration;
@@ -696,71 +698,86 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
     }
 }
 
-fn parse_args() -> Result<(Option<PathBuf>, PathBuf), String> {
-    let mut args = env::args_os();
-    let _ = args.next();
-    let mut image_path = None;
-    let mut mountpoint = None;
-    let mut force_memory = false;
+#[derive(Debug, Clone)]
+enum MountArgs {
+    Memory {
+        mountpoint: PathBuf,
+        config: FsConfig,
+    },
+    Image {
+        image: PathBuf,
+        mountpoint: PathBuf,
+    },
+}
 
-    for arg in args {
-        if arg == "--help" {
-            return Err("usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string());
-        }
-        if arg == "--memory" || arg == "-m" {
-            force_memory = true;
-            continue;
-        }
-        if arg.to_string_lossy().starts_with('-') {
-            return Err(format!("unknown option: {}", arg.to_string_lossy()));
-        }
-        if image_path.is_none() {
-            image_path = Some(PathBuf::from(arg));
-            continue;
-        }
-        if mountpoint.is_none() {
-            mountpoint = Some(PathBuf::from(arg));
-            continue;
-        }
-        return Err("too many positional arguments".to_string());
-    }
+#[derive(Debug, Parser)]
+#[command(version)]
+struct Args {
+    #[arg(short = 'M', conflicts_with = "image", help = "Use memory-backed mode")]
+    memory: bool,
+    #[arg(short = 'i', long, value_name = "IMAGE", conflicts_with = "memory", help = "Path to the formatted image")]
+    image: Option<PathBuf>,
+    #[arg(long, requires = "memory", help = "Set the lock size of the image")]
+    block_size: Option<u16>,
+    #[arg(long, requires = "memory", help = "Set number of blocks in the image")]
+    block_count: Option<u16>,
+    #[arg(long, requires = "memory", help = "Set number of blocks in a cluster")]
+    blocks_per_cluster: Option<u16>,
+    #[arg(value_name = "MOUNT", help = "The mount point")]
+    mountpoint: PathBuf,
+}
 
-    let image_path =
-        image_path.ok_or_else(|| "usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string())?;
-    let mountpoint =
-        mountpoint.ok_or_else(|| "usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string())?;
-    let image_path = if force_memory || image_path.as_os_str() == "-" {
-        None
+fn parse_args() -> Result<MountArgs> {
+    let args = Args::parse();
+    if args.memory {
+        let mut config = FsConfig::default();
+        if let Some(value) = args.block_size {
+            config.block_size = value;
+        }
+        if let Some(value) = args.block_count {
+            config.block_count = value;
+        }
+        if let Some(value) = args.blocks_per_cluster {
+            config.blocks_per_cluster = value;
+        }
+        config
+            .validate()
+            .with_context(|| "invalid filesystem config:")?;
+        Ok(MountArgs::Memory {
+            mountpoint: args.mountpoint,
+            config,
+        })
     } else {
-        Some(image_path)
-    };
-    Ok((image_path, mountpoint))
+        let image = args
+            .image
+            .ok_or_else(|| format_err!("either -M or -i <IMAGE> is required"))?;
+        Ok(MountArgs::Image {
+            image,
+            mountpoint: args.mountpoint,
+        })
+    }
 }
 
-fn open_memory_fs() -> Result<MyFileSystem<MemoryBlockDevice>, String> {
-    MyFileSystem::format_memory(FsConfig::default())
-        .map_err(|err| format!("failed to format in-memory filesystem: {err}"))
+fn open_memory_fs(config: FsConfig) -> Result<MyFileSystem<MemoryBlockDevice>> {
+    MyFileSystem::format_memory(config).with_context(|| "failed to format in-memory filesystem")
 }
 
-fn open_image_fs(
-    path: &PathBuf,
-) -> Result<MyFileSystem<LogicalBlockDevice<FileBlockDevice>>, String> {
+fn open_image_fs(path: &PathBuf) -> Result<MyFileSystem<LogicalBlockDevice<FileBlockDevice>>> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)
-        .map_err(|err| format!("failed to open image read-write: {err}"))?;
+        .with_context(|| "failed to open image read-write")?;
     let mut boot_bytes = vec![0; BOOT_SECTOR_SIZE];
     file.read_exact(&mut boot_bytes)
-        .map_err(|err| format!("failed to read boot sector: {err}"))?;
-    let boot = BootSector::read_from_prefix(&boot_bytes)
-        .map_err(|err| format!("failed to parse boot sector: {err}"))?;
+        .with_context(|| "failed to read boot sector")?;
+    let boot =
+        BootSector::read_from_prefix(&boot_bytes).with_context(|| "failed to parse boot sector")?;
     let device = FileBlockDevice::from_file(file, usize::from(boot.block_size))
-        .map_err(|err| format!("failed to build file-backed device: {err}"))?;
+        .with_context(|| "failed to build file-backed device")?;
     let device = LogicalBlockDevice::new(device, usize::from(boot.block_size))
-        .map_err(|err| format!("failed to build logical block adapter: {err}"))?;
-    MyFileSystem::open_on_device(device)
-        .map_err(|err| format!("failed to open filesystem image: {err}"))
+        .with_context(|| "failed to build logical block adapter")?;
+    MyFileSystem::open_on_device(device).with_context(|| "failed to open filesystem image")
 }
 
 fn mount_fs<D: BufferedBlockDevice + Send + 'static>(
@@ -774,35 +791,20 @@ fn mount_fs<D: BufferedBlockDevice + Send + 'static>(
     fuser::mount2(FuseMyFileSystem::new(fs), mountpoint, &mount_config)
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
 
-    let (image_path, mountpoint) = match parse_args() {
-        Ok(value) => value,
-        Err(err) => {
-            eprintln!("{err}");
-            process::exit(2);
+    let args = parse_args()?;
+    match args {
+        MountArgs::Memory { mountpoint, config } => {
+            let fs = open_memory_fs(config)?;
+            mount_fs(fs, mountpoint)?;
+        }
+        MountArgs::Image { image, mountpoint } => {
+            let fs = open_image_fs(&image)?;
+            mount_fs(fs, mountpoint)?;
         }
     };
 
-    let mount_result = match image_path {
-        None => match open_memory_fs() {
-            Ok(fs) => mount_fs(fs, mountpoint),
-            Err(err) => {
-                eprintln!("{err}");
-                process::exit(1);
-            }
-        },
-        Some(path) => match open_image_fs(&path) {
-            Ok(fs) => mount_fs(fs, mountpoint),
-            Err(err) => {
-                eprintln!("{err}");
-                process::exit(1);
-            }
-        },
-    };
-    if let Err(err) = mount_result {
-        eprintln!("failed to mount myfs: {err}");
-        process::exit(1);
-    }
+    Ok(())
 }
