@@ -187,10 +187,12 @@ impl From<FuseSystemTime> for SystemTime {
 #[repr(transparent)]
 struct FuseFileAttr(FileAttr);
 
-impl TryFrom<(&FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
+impl TryFrom<(&Request, &FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
     type Error = FsError;
 
-    fn try_from((owner, meta): (&FuseMyFileSystem, &NodeMeta)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (req, owner, meta): (&Request, &FuseMyFileSystem, &NodeMeta),
+    ) -> Result<Self, Self::Error> {
         let ctime = SystemTime::from(FuseSystemTime::try_from(meta)?);
         Ok(Self(FileAttr {
             ino: INodeNo::from(FuseNodeId::from(meta.node_id)),
@@ -201,16 +203,13 @@ impl TryFrom<(&FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
             ctime,
             crtime: ctime,
             kind: FileType::from(FuseFileType::from(meta.kind)),
-            perm: match meta.kind {
-                NodeKind::File => 0o644,
-                NodeKind::Directory => 0o755,
-            },
+            perm: 0o755,
             nlink: match meta.kind {
                 NodeKind::File => 1,
                 NodeKind::Directory => 2,
             },
-            uid: 0,
-            gid: 0,
+            uid: req.uid(),
+            gid: req.gid(),
             rdev: 0,
             blksize: u32::from(owner.block_size),
             flags: 0,
@@ -336,7 +335,7 @@ impl Filesystem for FuseMyFileSystem {
         }
     }
 
-    fn lookup(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent.0, name);
         let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
@@ -344,26 +343,26 @@ impl Filesystem for FuseMyFileSystem {
         let meta = unwrap_or_reply_fs_error!(reply, Self::lookup_meta(&fs, parent, name));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
-            FuseFileAttr::try_from((self, &meta))
+            FuseFileAttr::try_from((req, self, &meta))
         ));
         reply.entry(&TTL_ZERO, &attr, GENERATION_ZERO);
     }
 
-    fn getattr(&self, _: &Request, ino: INodeNo, _: Option<fuser::FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, req: &Request, ino: INodeNo, _: Option<fuser::FileHandle>, reply: ReplyAttr) {
         debug!("getattr(ino={})", ino.0);
         let node = FuseNodeId::from(ino).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
-            FuseFileAttr::try_from((self, &meta))
+            FuseFileAttr::try_from((req, self, &meta))
         ));
         reply.attr(&TTL_ZERO, &attr);
     }
 
     fn mknod(
         &self,
-        _: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -389,14 +388,14 @@ impl Filesystem for FuseMyFileSystem {
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
-            FuseFileAttr::try_from((self, &meta))
+            FuseFileAttr::try_from((req, self, &meta))
         ));
         reply.entry(&TTL_ZERO, &attr, GENERATION_ZERO);
     }
 
     fn mkdir(
         &self,
-        _: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -417,7 +416,7 @@ impl Filesystem for FuseMyFileSystem {
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
-            FuseFileAttr::try_from((self, &meta))
+            FuseFileAttr::try_from((req, self, &meta))
         ));
         reply.entry(&TTL_ZERO, &attr, GENERATION_ZERO);
     }
@@ -587,7 +586,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn create(
         &self,
-        _: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -609,7 +608,7 @@ impl Filesystem for FuseMyFileSystem {
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
-            FuseFileAttr::try_from((self, &meta))
+            FuseFileAttr::try_from((req, self, &meta))
         ));
         reply.created(
             &TTL_ZERO,
