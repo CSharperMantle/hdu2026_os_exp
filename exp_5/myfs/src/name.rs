@@ -119,18 +119,18 @@ impl<const SIZE: usize> TryFrom<&str> for SpacedCharBuf<SIZE> {
 }
 
 /// HACK: Concrete value for [`ShortName::BASE_SIZE`].
-/// 
+///
 /// This is to work around a quirk of rustc with `{ Self::BASE_SIZE }`:
-/// 
+///
 /// ```plain-text
 /// error[E0433]: failed to resolve: `Self` is only available in impls, traits, and type definitions
 /// ```
 const BASE_SIZE: usize = 9;
 
-/// HACK: Concrete value for [`ShortName::EXT_SIZE`]. 
-/// 
+/// HACK: Concrete value for [`ShortName::EXT_SIZE`].
+///
 /// This is to work around a quirk of rustc with `{ Self::EXT_SIZE }`:
-/// 
+///
 /// ```plain-text
 /// error[E0433]: failed to resolve: `Self` is only available in impls, traits, and type definitions
 /// ```
