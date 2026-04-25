@@ -443,6 +443,9 @@ dependencies = [
 [[package]]
 name = "mkfs_myfs"
 version = "0.1.0"
+dependencies = [
+ "myfs",
+]
 
 [[package]]
 name = "myfs"
