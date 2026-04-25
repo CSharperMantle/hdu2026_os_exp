@@ -287,7 +287,8 @@ impl Shell {
     }
 
     fn print_dir(&self, dir_start: ClusterId) -> Result<()> {
-        for entry in self.fs.list_dir(dir_start)? {
+        for entry in self.fs.dir_entries(dir_start)? {
+            let entry = entry?;
             println!(
                 "{}\t<{}>\t{}\t{}\t{}\t{}",
                 entry.cdatetime,
@@ -322,8 +323,8 @@ impl Shell {
     }
 
     fn print_open_files(&self) {
-        let entries = self.fs.opened_files();
-        if entries.is_empty() {
+        let mut entries = self.fs.open_files().peekable();
+        if entries.peek().is_none() {
             println!("<no open files>");
             return;
         }
