@@ -115,8 +115,7 @@ impl Shell {
                 println!("handle {handle}");
             }
             "close" => {
-                let arg = parts.get(1).ok_or("usage: close <handle|path>")?;
-                let handle = self.resolve_handle(arg)?;
+                let handle = self.parse_handle(parts.get(1), "usage: close <handle>")?;
                 self.fs.close(handle)?;
             }
             "read" => {
@@ -259,17 +258,6 @@ impl Shell {
         usage: &str,
     ) -> Result<FileHandle, Box<dyn std::error::Error>> {
         Ok(value.ok_or(usage)?.parse::<u32>()?.into())
-    }
-
-    fn resolve_handle(&self, arg: &str) -> Result<FileHandle, Box<dyn std::error::Error>> {
-        if let Ok(raw) = arg.parse::<u32>() {
-            return Ok(raw.into());
-        }
-        let target = self.resolve_target(arg)?;
-        let loc = target.loc().ok_or("root is not openable")?;
-        self.fs
-            .find_open_handle(loc)
-            .ok_or_else(|| format!("file is not open: {loc}").into())
     }
 
     fn read_interactive_payload(
