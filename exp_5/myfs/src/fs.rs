@@ -172,9 +172,9 @@ pub struct Fcb {
     pub size: u32,
 }
 
-pub const FCB_SIZE: usize = std::mem::size_of::<Fcb>();
-
 impl Fcb {
+    pub const SIZE: usize = std::mem::size_of::<Fcb>();
+
     pub(crate) fn new(
         name: &str,
         kind: NodeKind,
@@ -206,7 +206,7 @@ impl Fcb {
 
     pub fn write_to_slice(&self, dst: &mut [u8]) -> Result<(), FsError> {
         let dst = dst
-            .get_mut(..FCB_SIZE)
+            .get_mut(..Fcb::SIZE)
             .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
         dst.copy_from_slice(self.as_bytes());
         Ok(())
@@ -214,7 +214,7 @@ impl Fcb {
 
     pub fn read_from_bytes(bytes: &[u8]) -> Result<Self, FsError> {
         let bytes = bytes
-            .get(..FCB_SIZE)
+            .get(..Fcb::SIZE)
             .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
         Ok(bytemuck::pod_read_unaligned(bytes))
     }
@@ -266,14 +266,14 @@ mod tests {
     #[test]
     fn fcb_bytes_round_trip() {
         let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId(7), 123).unwrap();
-        assert_eq!(fcb.as_bytes().len(), FCB_SIZE);
+        assert_eq!(fcb.as_bytes().len(), Fcb::SIZE);
         assert_eq!(Fcb::read_from_bytes(fcb.as_bytes()).unwrap(), fcb);
     }
 
     #[test]
     fn write_to_slice_rejects_short_buffer() {
         let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0).unwrap();
-        let mut short = [0u8; FCB_SIZE - 1];
+        let mut short = [0u8; Fcb::SIZE - 1];
         assert!(fcb.write_to_slice(&mut short).is_err());
     }
 }

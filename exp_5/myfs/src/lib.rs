@@ -1,11 +1,16 @@
+#![allow(unused_imports)]
+
 mod dev;
+mod fat;
 mod fs;
 mod name;
 
 pub use dev::*;
+pub use fat::*;
 pub use fs::*;
 pub use name::*;
 
+use std::collections::HashSet;
 use std::error;
 use std::fmt;
 
@@ -84,7 +89,7 @@ impl From<DirEntryLoc> for NodeId {
 }
 
 /// The result for creating a [`DirEntryLoc`] from a [`NodeId`].
-/// 
+///
 /// For internal use only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirEntryLocFromNodeIdResult {
@@ -210,7 +215,7 @@ impl TryFrom<&[u8]> for DirSlot {
     type Error = FsError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < FCB_SIZE {
+        if value.len() < Fcb::SIZE {
             return Err(FsError::CorruptFs(
                 "fcb slot shorter than expected".to_string(),
             ));
@@ -235,6 +240,50 @@ pub struct OpenFile {
     pub loc: DirEntryLoc,
     pub cursor: usize,
     pub fcb: Fcb,
+}
+
+struct ChainIter<'a, D: BlockDevice> {
+    fs: &'a MyFileSystem<D>,
+    start: ClusterId,
+    current: Option<ClusterId>,
+    visited: HashSet<ClusterId>,
+}
+
+impl<'a, D: BlockDevice> Iterator for ChainIter<'a, D> {
+    type Item = Result<ClusterId, FsError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current?;
+        if !self.visited.insert(current) {
+            self.current = None;
+            return Some(Err(FsError::CorruptFs(format!(
+                "cluster loop detected at {}",
+                current
+            ))));
+        }
+
+        match self.fs.read_fat(current) {
+            Ok(FatEntry::Free) => {
+                self.current = None;
+                Some(Err(FsError::CorruptFs(format!(
+                    "cluster chain from {} reaches free entry",
+                    self.start
+                ))))
+            }
+            Ok(FatEntry::EndOfChain) => {
+                self.current = None;
+                Some(Ok(current))
+            }
+            Ok(FatEntry::Next(next)) => {
+                self.current = Some(next);
+                Some(Ok(current))
+            }
+            Err(err) => {
+                self.current = None;
+                Some(Err(err))
+            }
+        }
+    }
 }
 
 /// Main object for a mounted MyFileSystem instance.
@@ -536,10 +585,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn dump_fat(&self) -> String {
         let mut out = String::new();
-        for raw in u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()) {
-            let cluster = ClusterId::from(raw);
-            let value = self.read_fat_entry(cluster).unwrap_or(ClusterId::FREE);
-            out.push_str(&format!("{raw:>3} -> {value}\n"));
+        for i in u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()) {
+            let value = self.read_fat(i.into()).unwrap_or(FatEntry::Free);
+            out.push_str(&format!("{i}\t->\t{value}\n"));
         }
         out
     }
@@ -563,7 +611,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn initialize_root_directory(&mut self) -> Result<(), FsError> {
-        self.write_fat_entry(self.boot.root_dir_start_cluster, ClusterId::EOC)?;
+        self.write_fat(self.boot.root_dir_start_cluster, FatEntry::EndOfChain)?;
         self.zero_cluster(self.boot.root_dir_start_cluster)?;
         Ok(())
     }
@@ -577,7 +625,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn dir_size(&self, dir_start: ClusterId) -> Result<u32, FsError> {
-        Ok(self.scan_dir(dir_start)?.len() as u32 * FCB_SIZE as u32)
+        Ok(self.scan_dir(dir_start)?.len() as u32 * Fcb::SIZE as u32)
     }
 
     fn ensure_fcb_capacity(
@@ -588,7 +636,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let current = if fcb.start_cluster == ClusterId::FREE {
             0
         } else {
-            self.cluster_chain(fcb.start_cluster)?.len()
+            self.chain_len_of(fcb.start_cluster)?
         };
         if needed_clusters <= current {
             return Ok(fcb);
@@ -597,13 +645,16 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if current == 0 {
             fcb.start_cluster = extra[0];
         } else {
-            let chain = self.cluster_chain(fcb.start_cluster)?;
-            let last = *chain.last().expect("existing chain has last cluster");
-            self.write_fat_entry(last, extra[0])?;
+            let last = self.chain_tail_of(fcb.start_cluster)?;
+            self.write_fat(last, FatEntry::Next(extra[0]))?;
         }
         for (idx, cluster) in extra.iter().enumerate() {
-            let next = extra.get(idx + 1).copied().unwrap_or(ClusterId::EOC);
-            self.write_fat_entry(*cluster, next)?;
+            let next = extra
+                .get(idx + 1)
+                .copied()
+                .map(FatEntry::Next)
+                .unwrap_or(FatEntry::EndOfChain);
+            self.write_fat(*cluster, next)?;
         }
         Ok(fcb)
     }
@@ -663,33 +714,38 @@ impl<D: BlockDevice> MyFileSystem<D> {
             .collect())
     }
 
-    fn fat_offset(&self, cluster: ClusterId) -> usize {
-        usize::from(u16::from(cluster)) * 2
-    }
-
-    fn read_fat_entry(&self, cluster: ClusterId) -> Result<ClusterId, FsError> {
-        let offset = self.fat_offset(cluster);
+    fn fat_block_and_offset(&self, cluster: ClusterId) -> Result<(usize, usize), FsError> {
+        if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
+            return Err(FsError::CorruptFs(format!(
+                "cluster {} outside data region",
+                cluster
+            )));
+        }
+        let offset = fat_offset(cluster);
         let block_offset = offset / self.device.block_size();
         let byte_offset = offset % self.device.block_size();
+        Ok((block_offset, byte_offset))
+    }
+
+    fn read_fat(&self, cluster: ClusterId) -> Result<FatEntry, FsError> {
+        let (block_offset, byte_offset) = self.fat_block_and_offset(cluster)?;
         let block = BlockId::from(
             u16::from(self.boot.fat_start_block) + u16::try_from(block_offset).unwrap(),
         );
         let bytes = self.device.read_block(block);
-        if byte_offset + 2 > bytes.len() {
+        if byte_offset + FatEntry::SIZE > bytes.len() {
             return Err(FsError::CorruptFs(
                 "fat entry crosses block boundary".to_string(),
             ));
         }
-        Ok(ClusterId::from(u16::from_le_bytes([
+        Ok(FatEntry::from(u16::from_le_bytes([
             bytes[byte_offset],
             bytes[byte_offset + 1],
         ])))
     }
 
-    fn write_fat_entry(&mut self, cluster: ClusterId, value: ClusterId) -> Result<(), FsError> {
-        let offset = self.fat_offset(cluster);
-        let block_offset = offset / self.device.block_size();
-        let byte_offset = offset % self.device.block_size();
+    fn write_fat(&mut self, cluster: ClusterId, value: FatEntry) -> Result<(), FsError> {
+        let (block_offset, byte_offset) = self.fat_block_and_offset(cluster)?;
         let fat_bytes = u16::from(value).to_le_bytes();
 
         for copy in 0..self.boot.fat_copies {
@@ -702,33 +758,74 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn cluster_chain(&self, start: ClusterId) -> Result<Vec<ClusterId>, FsError> {
-        if start == ClusterId::FREE {
-            return Ok(Vec::new());
+    fn chain_iter(&self, start: ClusterId) -> Result<ChainIter<'_, D>, FsError> {
+        if start != ClusterId::FREE {
+            let _ = self.fat_block_and_offset(start)?;
         }
-        let mut chain = Vec::new();
+        Ok(ChainIter {
+            fs: self,
+            start,
+            current: (start != ClusterId::FREE).then_some(start),
+            visited: HashSet::new(),
+        })
+    }
+
+    fn chain_len_of(&self, start: ClusterId) -> Result<usize, FsError> {
+        let mut len = 0;
+        for cluster in self.chain_iter(start)? {
+            cluster?;
+            len += 1;
+        }
+        Ok(len)
+    }
+
+    fn chain_tail_of(&self, start: ClusterId) -> Result<ClusterId, FsError> {
+        let mut last = None;
+        for cluster in self.chain_iter(start)? {
+            last = Some(cluster?);
+        }
+        last.ok_or(FsError::CorruptFs(format!(
+            "chain head cluster {} invalid",
+            start
+        )))
+    }
+
+    fn try_for_each_cluster_mut<F>(&mut self, start: ClusterId, mut f: F) -> Result<(), FsError>
+    where
+        F: FnMut(&mut Self, ClusterId) -> Result<(), FsError>,
+    {
+        if start == ClusterId::FREE {
+            return Ok(());
+        }
+        let _ = self.fat_block_and_offset(start)?;
+        let mut visited = HashSet::new();
         let mut current = start;
         loop {
-            chain.push(current);
-            let next = self.read_fat_entry(current)?;
-            if next == ClusterId::EOC {
-                break;
-            }
-            if next == ClusterId::FREE {
-                return Err(FsError::CorruptFs(format!(
-                    "cluster chain from {} reaches free entry",
-                    start
-                )));
-            }
-            if chain.contains(&next) {
+            if !visited.insert(current) {
                 return Err(FsError::CorruptFs(format!(
                     "cluster loop detected at {}",
-                    next
+                    current
                 )));
             }
-            current = next;
+            let next = self.read_fat(current)?;
+            match next {
+                FatEntry::Free => {
+                    return Err(FsError::CorruptFs(format!(
+                        "cluster chain from {} reaches free entry",
+                        start
+                    )));
+                }
+                FatEntry::EndOfChain => {
+                    f(self, current)?;
+                    break;
+                }
+                FatEntry::Next(next_cluster) => {
+                    f(self, current)?;
+                    current = next_cluster;
+                }
+            }
         }
-        Ok(chain)
+        Ok(())
     }
 
     fn allocate_clusters(&mut self, len: usize) -> Result<Vec<ClusterId>, FsError> {
@@ -736,9 +833,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for _ in 0..len {
             let cluster = (u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()))
                 .map(ClusterId::from)
-                .find(|cluster| self.read_fat_entry(*cluster).ok() == Some(ClusterId::FREE))
+                .find(|cluster| self.read_fat(*cluster).ok() == Some(FatEntry::Free))
                 .ok_or(FsError::NoSpace)?;
-            self.write_fat_entry(cluster, ClusterId::EOC)?;
+            self.write_fat(cluster, FatEntry::EndOfChain)?;
             self.zero_cluster(cluster)?;
             out.push(cluster);
         }
@@ -749,12 +846,31 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if start == ClusterId::FREE {
             return Ok(());
         }
-        let chain = self.cluster_chain(start)?;
-        for cluster in chain {
-            self.write_fat_entry(cluster, ClusterId::FREE)?;
-            self.zero_cluster(cluster)?;
-        }
+        self.try_for_each_cluster_mut(start, |fs, cluster| {
+            fs.write_fat(cluster, FatEntry::Free)?;
+            fs.zero_cluster(cluster)?;
+            Ok(())
+        })?;
         Ok(())
+    }
+
+    fn advance_chain_iter_to(
+        &self,
+        start: ClusterId,
+        cluster_index: usize,
+    ) -> Result<ChainIter<'_, D>, FsError> {
+        let mut iter = self.chain_iter(start)?;
+        for _ in 0..cluster_index {
+            iter.next()
+                .transpose()?
+                .ok_or_else(|| FsError::CorruptFs("offset beyond cluster chain".to_string()))?;
+        }
+        Ok(iter)
+    }
+
+    #[cfg(test)]
+    fn collect_chain(&self, start: ClusterId) -> Result<Vec<ClusterId>, FsError> {
+        self.chain_iter(start)?.collect()
     }
 
     fn read_chain_bytes(
@@ -767,14 +883,14 @@ impl<D: BlockDevice> MyFileSystem<D> {
             return Ok(Vec::new());
         }
         let cluster_size = self.cluster_size();
-        let chain = self.cluster_chain(start)?;
         let mut out = Vec::with_capacity(len);
         let mut remaining = len;
         let mut cursor = offset;
+        let mut iter = self.advance_chain_iter_to(start, cursor / cluster_size)?;
         while remaining > 0 {
-            let cluster_index = cursor / cluster_size;
-            let cluster = *chain
-                .get(cluster_index)
+            let cluster = iter
+                .next()
+                .transpose()?
                 .ok_or_else(|| FsError::CorruptFs("offset beyond cluster chain".to_string()))?;
             let cluster_bytes = self.read_cluster_bytes(cluster)?;
             let in_cluster = cursor % cluster_size;
@@ -796,24 +912,66 @@ impl<D: BlockDevice> MyFileSystem<D> {
             return Ok(());
         }
         let cluster_size = self.cluster_size();
-        let chain = self.cluster_chain(start)?;
         let mut remaining = data.len();
         let mut cursor = offset;
         let mut written = 0;
+        let mut visited = HashSet::new();
+        let mut current = start;
+        for _ in 0..(cursor / cluster_size) {
+            if !visited.insert(current) {
+                return Err(FsError::CorruptFs(format!(
+                    "cluster loop detected at {}",
+                    current
+                )));
+            }
+            current = match self.read_fat(current)? {
+                FatEntry::Next(next) => next,
+                FatEntry::Free => {
+                    return Err(FsError::CorruptFs(format!(
+                        "cluster chain from {} reaches free entry",
+                        start
+                    )));
+                }
+                FatEntry::EndOfChain => {
+                    return Err(FsError::CorruptFs(
+                        "offset beyond cluster chain".to_string(),
+                    ));
+                }
+            };
+        }
         while remaining > 0 {
-            let cluster_index = cursor / cluster_size;
-            let cluster = *chain
-                .get(cluster_index)
-                .ok_or_else(|| FsError::CorruptFs("offset beyond cluster chain".to_string()))?;
-            let mut cluster_bytes = self.read_cluster_bytes(cluster)?;
+            if !visited.insert(current) {
+                return Err(FsError::CorruptFs(format!(
+                    "cluster loop detected at {}",
+                    current
+                )));
+            }
+            let next = self.read_fat(current)?;
+            let mut cluster_bytes = self.read_cluster_bytes(current)?;
             let in_cluster = cursor % cluster_size;
             let chunk = remaining.min(cluster_size - in_cluster);
             cluster_bytes[in_cluster..in_cluster + chunk]
                 .copy_from_slice(&data[written..written + chunk]);
-            self.write_cluster_bytes(cluster, &cluster_bytes)?;
+            self.write_cluster_bytes(current, &cluster_bytes)?;
             cursor += chunk;
             written += chunk;
             remaining -= chunk;
+            if remaining > 0 {
+                current = match next {
+                    FatEntry::Next(next) => next,
+                    FatEntry::Free => {
+                        return Err(FsError::CorruptFs(format!(
+                            "cluster chain from {} reaches free entry",
+                            start
+                        )));
+                    }
+                    FatEntry::EndOfChain => {
+                        return Err(FsError::CorruptFs(
+                            "offset beyond cluster chain".to_string(),
+                        ));
+                    }
+                };
+            }
         }
         Ok(())
     }
@@ -842,14 +1000,14 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     fn scan_dir(&self, dir_start: ClusterId) -> Result<Vec<(DirEntryLoc, DirSlot)>, FsError> {
         let mut out = Vec::new();
-        let chain = self.cluster_chain(dir_start)?;
-        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
+        let entries_per_cluster = self.cluster_size() / Fcb::SIZE;
         let mut entry_index = 0u32;
-        for cluster in chain {
+        for cluster in self.chain_iter(dir_start)? {
+            let cluster = cluster?;
             let bytes = self.read_cluster_bytes(cluster)?;
             for slot in 0..entries_per_cluster {
-                let start = slot * FCB_SIZE;
-                let end = start + FCB_SIZE;
+                let start = slot * Fcb::SIZE;
+                let end = start + Fcb::SIZE;
                 let parsed = DirSlot::try_from(&bytes[start..end])?;
                 match parsed {
                     DirSlot::Unused => {}
@@ -876,18 +1034,18 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn read_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
-        let bytes = self.read_chain_bytes(loc.dir_start, self.slot_offset(loc), FCB_SIZE)?;
+        let bytes = self.read_chain_bytes(loc.dir_start, self.slot_offset(loc), Fcb::SIZE)?;
         DirSlot::try_from(bytes.as_slice())
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
-        let mut bytes = [0; FCB_SIZE];
+        let mut bytes = [0; Fcb::SIZE];
         fcb.write_to_slice(&mut bytes)?;
         self.write_chain_bytes(loc.dir_start, self.slot_offset(loc), &bytes)
     }
 
     fn mark_slot_deleted(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
-        let mut bytes = [0; FCB_SIZE];
+        let mut bytes = [0; Fcb::SIZE];
         bytes[0] = DirSlot::SLOT_DELETED;
         self.write_chain_bytes(loc.dir_start, self.slot_offset(loc), &bytes)
     }
@@ -900,18 +1058,20 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn slot_offset(&self, loc: DirEntryLoc) -> usize {
-        usize::try_from(loc.entry_index).unwrap() * FCB_SIZE
+        usize::try_from(loc.entry_index).unwrap() * Fcb::SIZE
     }
 
     fn find_free_dir_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
-        let chain = self.cluster_chain(dir_start)?;
-        let entries_per_cluster = self.cluster_size() / FCB_SIZE;
+        let entries_per_cluster = self.cluster_size() / Fcb::SIZE;
         let mut entry_index = 0u32;
-        for cluster in &chain {
-            let bytes = self.read_cluster_bytes(*cluster)?;
+        let mut last_cluster = None;
+        for cluster in self.chain_iter(dir_start)? {
+            let cluster = cluster?;
+            last_cluster = Some(cluster);
+            let bytes = self.read_cluster_bytes(cluster)?;
             for slot in 0..entries_per_cluster {
-                let start = slot * FCB_SIZE;
-                let end = start + FCB_SIZE;
+                let start = slot * Fcb::SIZE;
+                let end = start + Fcb::SIZE;
                 match DirSlot::try_from(&bytes[start..end])? {
                     DirSlot::Unused | DirSlot::Deleted => {
                         return Ok(DirEntryLoc {
@@ -926,11 +1086,10 @@ impl<D: BlockDevice> MyFileSystem<D> {
         }
 
         let new_cluster = self.allocate_clusters(1)?[0];
-        let last = *chain
-            .last()
+        let last = last_cluster
             .ok_or_else(|| FsError::CorruptFs("directory has no cluster chain".to_string()))?;
-        self.write_fat_entry(last, new_cluster)?;
-        self.write_fat_entry(new_cluster, ClusterId::EOC)?;
+        self.write_fat(last, FatEntry::Next(new_cluster))?;
+        self.write_fat(new_cluster, FatEntry::EndOfChain)?;
         Ok(DirEntryLoc {
             dir_start,
             entry_index,
@@ -1005,13 +1164,13 @@ mod tests {
 
     #[test]
     fn parse_dir_slot_recognizes_unused_and_deleted() {
-        let unused = [0u8; FCB_SIZE];
+        let unused = [0u8; Fcb::SIZE];
         assert!(matches!(
             DirSlot::try_from(unused.as_slice()).unwrap(),
             DirSlot::Unused
         ));
 
-        let mut deleted = [0u8; FCB_SIZE];
+        let mut deleted = [0u8; Fcb::SIZE];
         deleted[0] = DirSlot::SLOT_DELETED;
         assert!(matches!(
             DirSlot::try_from(deleted.as_slice()).unwrap(),
@@ -1081,8 +1240,8 @@ mod tests {
         let fat2 = fs.device.read_block(BlockId(2)).to_vec();
         assert_eq!(fat1, fat2);
         assert_eq!(
-            fs.read_fat_entry(ROOT_DIR_START_CLUSTER).unwrap(),
-            ClusterId::EOC
+            fs.read_fat(ROOT_DIR_START_CLUSTER).unwrap(),
+            FatEntry::EndOfChain
         );
         assert_eq!(fs.list_dir(fs.root_dir_cluster()).unwrap().len(), 0);
     }
@@ -1112,7 +1271,7 @@ mod tests {
             fs.create_file(fs.root_dir_cluster(), &format!("R{idx}.TXT"))
                 .unwrap();
         }
-        let chain = fs.cluster_chain(fs.root_dir_cluster()).unwrap();
+        let chain = fs.collect_chain(fs.root_dir_cluster()).unwrap();
         assert_eq!(chain.len(), 2);
         assert_eq!(chain[0], ROOT_DIR_START_CLUSTER);
     }
@@ -1132,7 +1291,9 @@ mod tests {
         assert_eq!(docs_meta.short_name, "DOCS");
         assert_eq!(docs_meta.kind, NodeKind::Directory);
 
-        let readme_loc = fs.create_file(docs_meta.start_cluster, "README.TXT").unwrap();
+        let readme_loc = fs
+            .create_file(docs_meta.start_cluster, "README.TXT")
+            .unwrap();
         let readme_node = fs.lookup_node(docs_node, "README.TXT").unwrap();
         let readme_meta = fs.stat_node(readme_node).unwrap();
         assert_eq!(readme_meta.loc, Some(readme_loc));
@@ -1260,7 +1421,7 @@ mod tests {
         assert_eq!(stat.size, payload.len() as u32);
         assert_ne!(stat.start_cluster, ClusterId::FREE);
         let start = fs.read_fcb_at(file_loc).unwrap().start_cluster;
-        assert_eq!(fs.cluster_chain(start).unwrap().len(), 2);
+        assert_eq!(fs.chain_len_of(start).unwrap(), 2);
     }
 
     #[test]
