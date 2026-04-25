@@ -10,7 +10,9 @@ use myfs::*;
 use std::convert::TryFrom;
 use std::env;
 use std::ffi::OsStr;
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process;
 use std::sync::Mutex;
@@ -212,11 +214,13 @@ impl From<FuseDateTimeUtc> for DateTime<Utc> {
 #[repr(transparent)]
 struct FuseFileAttr(FileAttr);
 
-impl TryFrom<(&Request, &FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
+impl<D: BufferedBlockDevice + Send> TryFrom<(&Request, &FuseMyFileSystem<D>, &NodeMeta)>
+    for FuseFileAttr
+{
     type Error = FsError;
 
     fn try_from(
-        (req, owner, meta): (&Request, &FuseMyFileSystem, &NodeMeta),
+        (req, owner, meta): (&Request, &FuseMyFileSystem<D>, &NodeMeta),
     ) -> Result<Self, Self::Error> {
         let mtime = SystemTime::from(FuseSystemTime::try_from(meta)?);
         Ok(Self(FileAttr {
@@ -248,13 +252,13 @@ impl From<FuseFileAttr> for FileAttr {
     }
 }
 
-struct FuseMyFileSystem {
-    fs: Mutex<MyFileSystem<MemoryBlockDevice>>,
+struct FuseMyFileSystem<D: BufferedBlockDevice + Send> {
+    fs: Mutex<MyFileSystem<D>>,
     block_size: u16,
 }
 
-impl FuseMyFileSystem {
-    fn new(fs: MyFileSystem<MemoryBlockDevice>) -> Self {
+impl<D: BufferedBlockDevice + Send> FuseMyFileSystem<D> {
+    fn new(fs: MyFileSystem<D>) -> Self {
         let block_size = fs.boot_sector().block_size;
         Self {
             fs: Mutex::new(fs),
@@ -262,14 +266,11 @@ impl FuseMyFileSystem {
         }
     }
 
-    fn lock_fs(&self) -> Result<MutexGuard<'_, MyFileSystem<MemoryBlockDevice>>, fuser::Errno> {
+    fn lock_fs(&self) -> Result<MutexGuard<'_, MyFileSystem<D>>, fuser::Errno> {
         self.fs.lock().map_err(|_| fuser::Errno::EIO)
     }
 
-    fn dir_cluster(
-        fs: &MyFileSystem<MemoryBlockDevice>,
-        node: NodeId,
-    ) -> Result<ClusterId, FsError> {
+    fn dir_cluster(fs: &MyFileSystem<D>, node: NodeId) -> Result<ClusterId, FsError> {
         let meta = fs.stat_node(node)?;
         if meta.kind != NodeKind::Directory {
             return Err(FsError::NotADirectory(meta.short_name));
@@ -278,7 +279,7 @@ impl FuseMyFileSystem {
     }
 
     fn find_parent_under(
-        fs: &MyFileSystem<MemoryBlockDevice>,
+        fs: &MyFileSystem<D>,
         current: NodeId,
         target: NodeId,
     ) -> Result<Option<NodeId>, FsError> {
@@ -296,7 +297,7 @@ impl FuseMyFileSystem {
         Ok(None)
     }
 
-    fn parent_of(fs: &MyFileSystem<MemoryBlockDevice>, node: NodeId) -> Result<NodeId, FsError> {
+    fn parent_of(fs: &MyFileSystem<D>, node: NodeId) -> Result<NodeId, FsError> {
         if node == NodeId::ROOT {
             return Ok(NodeId::ROOT);
         }
@@ -309,7 +310,7 @@ impl FuseMyFileSystem {
     }
 
     fn lookup_meta(
-        fs: &MyFileSystem<MemoryBlockDevice>,
+        fs: &MyFileSystem<D>,
         parent: NodeId,
         name: &str,
     ) -> Result<myfs::NodeMeta, FsError> {
@@ -349,7 +350,7 @@ impl FuseMyFileSystem {
     }
 }
 
-impl Filesystem for FuseMyFileSystem {
+impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D> {
     fn init(&mut self, _: &Request, _: &mut KernelConfig) -> io::Result<()> {
         Ok(())
     }
@@ -695,65 +696,88 @@ impl Filesystem for FuseMyFileSystem {
     }
 }
 
-fn parse_u16(value: &OsStr, flag: &str) -> Result<u16, String> {
-    value
-        .to_str()
-        .ok_or_else(|| format!("{flag} must be valid UTF-8"))?
-        .parse::<u16>()
-        .map_err(|err| format!("invalid {flag}: {err}"))
-}
-
-fn parse_args() -> Result<(PathBuf, FsConfig), String> {
+fn parse_args() -> Result<(Option<PathBuf>, PathBuf), String> {
     let mut args = env::args_os();
     let _ = args.next();
-    let mut config = FsConfig::default();
+    let mut image_path = None;
     let mut mountpoint = None;
+    let mut force_memory = false;
 
-    while let Some(arg) = args.next() {
+    for arg in args {
         if arg == "--help" {
-            return Err("usage: myfs <mountpoint> [--block-size N] [--block-count N] [--blocks-per-cluster N]".to_string());
+            return Err("usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string());
         }
-        if arg == "--block-size" {
-            let value = args
-                .next()
-                .ok_or_else(|| "--block-size requires a value".to_string())?;
-            config.block_size = parse_u16(&value, "--block-size")?;
-            continue;
-        }
-        if arg == "--block-count" {
-            let value = args
-                .next()
-                .ok_or_else(|| "--block-count requires a value".to_string())?;
-            config.block_count = parse_u16(&value, "--block-count")?;
-            continue;
-        }
-        if arg == "--blocks-per-cluster" {
-            let value = args
-                .next()
-                .ok_or_else(|| "--blocks-per-cluster requires a value".to_string())?;
-            config.blocks_per_cluster = parse_u16(&value, "--blocks-per-cluster")?;
+        if arg == "--memory" || arg == "-m" {
+            force_memory = true;
             continue;
         }
         if arg.to_string_lossy().starts_with('-') {
             return Err(format!("unknown option: {}", arg.to_string_lossy()));
         }
-        if mountpoint.is_some() {
-            return Err("multiple mountpoints given".to_string());
+        if image_path.is_none() {
+            image_path = Some(PathBuf::from(arg));
+            continue;
         }
-        mountpoint = Some(PathBuf::from(arg));
+        if mountpoint.is_none() {
+            mountpoint = Some(PathBuf::from(arg));
+            continue;
+        }
+        return Err("too many positional arguments".to_string());
     }
 
-    let mountpoint = mountpoint.ok_or_else(|| {
-        "usage: myfs <mountpoint> [--block-size N] [--block-count N] [--blocks-per-cluster N]"
-            .to_string()
-    })?;
-    Ok((mountpoint, config))
+    let image_path =
+        image_path.ok_or_else(|| "usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string())?;
+    let mountpoint =
+        mountpoint.ok_or_else(|| "usage: myfs [--memory|-m] <image|-> <mountpoint>".to_string())?;
+    let image_path = if force_memory || image_path.as_os_str() == "-" {
+        None
+    } else {
+        Some(image_path)
+    };
+    Ok((image_path, mountpoint))
+}
+
+fn open_memory_fs() -> Result<MyFileSystem<MemoryBlockDevice>, String> {
+    MyFileSystem::format_memory(FsConfig::default())
+        .map_err(|err| format!("failed to format in-memory filesystem: {err}"))
+}
+
+fn open_image_fs(
+    path: &PathBuf,
+) -> Result<MyFileSystem<LogicalBlockDevice<FileBlockDevice>>, String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| format!("failed to open image read-write: {err}"))?;
+    let mut boot_bytes = vec![0; BOOT_SECTOR_SIZE];
+    file.read_exact(&mut boot_bytes)
+        .map_err(|err| format!("failed to read boot sector: {err}"))?;
+    let boot = BootSector::read_from_prefix(&boot_bytes)
+        .map_err(|err| format!("failed to parse boot sector: {err}"))?;
+    let device = FileBlockDevice::from_file(file, usize::from(boot.block_size))
+        .map_err(|err| format!("failed to build file-backed device: {err}"))?;
+    let device = LogicalBlockDevice::new(device, usize::from(boot.block_size))
+        .map_err(|err| format!("failed to build logical block adapter: {err}"))?;
+    MyFileSystem::open_on_device(device)
+        .map_err(|err| format!("failed to open filesystem image: {err}"))
+}
+
+fn mount_fs<D: BufferedBlockDevice + Send + 'static>(
+    fs: MyFileSystem<D>,
+    mountpoint: PathBuf,
+) -> io::Result<()> {
+    let mut mount_config = fuser::Config::default();
+    mount_config
+        .mount_options
+        .push(MountOption::FSName("myfs".to_string()));
+    fuser::mount2(FuseMyFileSystem::new(fs), mountpoint, &mount_config)
 }
 
 fn main() {
     env_logger::init();
 
-    let (mountpoint, config) = match parse_args() {
+    let (image_path, mountpoint) = match parse_args() {
         Ok(value) => value,
         Err(err) => {
             eprintln!("{err}");
@@ -761,19 +785,23 @@ fn main() {
         }
     };
 
-    let fs = match MyFileSystem::<MemoryBlockDevice>::format_memory(config) {
-        Ok(fs) => fs,
-        Err(err) => {
-            eprintln!("failed to format in-memory filesystem: {err}");
-            process::exit(1);
-        }
+    let mount_result = match image_path {
+        None => match open_memory_fs() {
+            Ok(fs) => mount_fs(fs, mountpoint),
+            Err(err) => {
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        },
+        Some(path) => match open_image_fs(&path) {
+            Ok(fs) => mount_fs(fs, mountpoint),
+            Err(err) => {
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        },
     };
-
-    let mut mount_config = fuser::Config::default();
-    mount_config
-        .mount_options
-        .push(MountOption::FSName("myfs".to_string()));
-    if let Err(err) = fuser::mount2(FuseMyFileSystem::new(fs), mountpoint, &mount_config) {
+    if let Err(err) = mount_result {
         eprintln!("failed to mount myfs: {err}");
         process::exit(1);
     }

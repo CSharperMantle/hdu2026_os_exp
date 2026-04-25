@@ -58,6 +58,28 @@ pub trait BufferedBlockDevice {
     }
 }
 
+impl<T: BufferedBlockDevice + ?Sized> BufferedBlockDevice for Box<T> {
+    fn block_size(&self) -> usize {
+        (**self).block_size()
+    }
+
+    fn block_count(&self) -> usize {
+        (**self).block_count()
+    }
+
+    fn read_block_into(&mut self, index: BlockId, dst: &mut [u8]) -> Result<(), FsError> {
+        (**self).read_block_into(index, dst)
+    }
+
+    fn write_block_from(&mut self, index: BlockId, src: &[u8]) -> Result<(), FsError> {
+        (**self).write_block_from(index, src)
+    }
+
+    fn zero_block(&mut self, index: BlockId) -> Result<(), FsError> {
+        (**self).zero_block(index)
+    }
+}
+
 /// Adapter exposing filesystem logical blocks on top of a physical device.
 ///
 /// FIXME: Current restriction: one logical block must be an integer multiple of one
