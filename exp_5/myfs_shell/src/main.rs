@@ -5,12 +5,11 @@ use std::io::Write;
 
 use myfs::*;
 
-fn main() {
+fn main() -> Result<()> {
+    env_logger::init();
     let mut shell = Shell::new().expect("filesystem should initialize");
-    if let Err(err) = shell.run() {
-        eprintln!("fatal: {err}");
-        std::process::exit(1);
-    }
+    shell.run()?;
+    Ok(())
 }
 
 struct Shell {
