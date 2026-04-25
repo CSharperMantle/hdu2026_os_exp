@@ -171,6 +171,12 @@ impl FsConfig {
                 "block size must be at least 1".to_string(),
             ));
         }
+        if !self.block_size.is_power_of_two() {
+            return Err(FsError::InvalidConfig(format!(
+                "block size {} is not a power of 2",
+                self.block_size
+            )));
+        }
         if (self.block_size as usize) < std::mem::size_of::<BootSector>() {
             return Err(FsError::InvalidConfig(format!(
                 "boot sector does not fit in block size {}",
@@ -181,6 +187,12 @@ impl FsConfig {
             return Err(FsError::InvalidConfig(
                 "blocks per cluster must be at least 1".to_string(),
             ));
+        }
+        if !self.blocks_per_cluster.is_power_of_two() {
+            return Err(FsError::InvalidConfig(format!(
+                "blocks per cluster {} is not a power of 2",
+                self.blocks_per_cluster
+            )));
         }
         let cluster_size =
             usize::from(self.block_size).saturating_mul(usize::from(self.blocks_per_cluster));
@@ -511,11 +523,11 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 config.block_size
             )));
         }
-        if device.block_count() != usize::from(config.block_count) {
+        if device.block_count() < usize::from(config.block_count) {
             return Err(FsError::InvalidConfig(format!(
-                "device block count {} does not match filesystem block count {}",
+                "filesystem block count {} exceeds device block count {}",
+                config.block_count,
                 device.block_count(),
-                config.block_count
             )));
         }
 
@@ -1603,9 +1615,9 @@ fn validate_boot_sector_against_device<D: BufferedBlockDevice>(
             device.block_size()
         )));
     }
-    if usize::from(boot.block_count) != device.block_count() {
+    if usize::from(boot.block_count) > device.block_count() {
         return Err(FsError::CorruptFs(format!(
-            "boot sector block count {} does not match device block count {}",
+            "boot sector block count {} exceeds device block count {}",
             boot.block_count,
             device.block_count()
         )));
@@ -1794,7 +1806,16 @@ mod tests {
                 blocks_per_cluster: 1,
             }
             .validate()
-            .is_ok()
+            .is_err()
+        );
+        assert!(
+            FsConfig {
+                block_size: 1024,
+                block_count: 128,
+                blocks_per_cluster: 3,
+            }
+            .validate()
+            .is_err()
         );
     }
 
@@ -1914,6 +1935,48 @@ mod tests {
     }
 
     #[test]
+    fn open_on_device_accepts_backing_file_larger_than_filesystem_image() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversized-backing.img");
+        let config = FsConfig {
+            block_size: 128,
+            block_count: 64,
+            blocks_per_cluster: 2,
+        };
+
+        let mut fs =
+            MyFileSystem::format_on_device(mkfiledev(&path, 128, 96), config.clone()).unwrap();
+        fs.create_file(fs.root_dir_cluster(), "BIGFILE.TXT")
+            .unwrap();
+        fs.sync().unwrap();
+        drop(fs);
+
+        let reopened = MyFileSystem::open_on_device(
+            LogicalBlockDevice::new(
+                FileBlockDevice::from_file(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .unwrap(),
+                    usize::from(config.block_size),
+                )
+                .unwrap(),
+                usize::from(config.block_size),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(reopened.boot_sector().block_count, config.block_count);
+        assert!(
+            reopened
+                .lookup(reopened.root_dir_cluster(), "BIGFILE.TXT")
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn format_respects_blocks_per_cluster() {
         let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
             block_size: 128,
@@ -1929,14 +1992,14 @@ mod tests {
     #[test]
     fn format_accepts_large_non_default_block_size() {
         let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
-            block_size: 1536,
+            block_size: 2048,
             block_count: 128,
             blocks_per_cluster: 2,
         })
         .unwrap();
-        assert_eq!(fs.boot.block_size, 1536);
-        assert_eq!(usize::from(fs.boot.block_size), 1536);
-        assert_eq!(fs.cluster_size(), 3072);
+        assert_eq!(fs.boot.block_size, 2048);
+        assert_eq!(usize::from(fs.boot.block_size), 2048);
+        assert_eq!(fs.cluster_size(), 4096);
     }
 
     #[test]
@@ -2055,7 +2118,7 @@ mod tests {
     #[test]
     fn io_works_with_large_blocks_and_clusters() {
         let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
-            block_size: 1536,
+            block_size: 2048,
             block_count: 128,
             blocks_per_cluster: 8,
         })
