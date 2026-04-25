@@ -66,40 +66,42 @@ macro_rules! ok_or_reply_fs_error {
     };
 }
 
+/// Local clone of [`NodeId`] for implementing conversions from [`INodeNo`].
 #[repr(transparent)]
-struct FuseNode(NodeId);
+struct FuseNodeId(NodeId);
 
-impl From<NodeId> for FuseNode {
+impl From<NodeId> for FuseNodeId {
     fn from(value: NodeId) -> Self {
         Self(value)
     }
 }
 
-impl From<FuseNode> for INodeNo {
-    fn from(value: FuseNode) -> Self {
-        Self(u64::from(value.0))
-    }
-}
-
-impl TryFrom<INodeNo> for FuseNode {
-    type Error = fuser::Errno;
-
-    fn try_from(value: INodeNo) -> Result<Self, Self::Error> {
+impl From<FuseNodeId> for INodeNo {
+    fn from(value: FuseNodeId) -> Self {
         match value.0 {
-            0 => Err(fuser::Errno::EINVAL),
-            raw => Ok(Self(NodeId::from(raw))),
+            val if val == NodeId::ROOT => fuser::INodeNo::ROOT,
+            val => Self(u64::from(val)),
         }
     }
 }
 
-/// Local clone of [`DirEntryLoc`] for implementing conversions from [`FuseNode`].
+impl From<INodeNo> for FuseNodeId {
+    fn from(value: INodeNo) -> Self {
+        match value {
+            val if val == fuser::INodeNo::ROOT => Self(NodeId::ROOT),
+            val => Self(NodeId::from(val.0)),
+        }
+    }
+}
+
+/// Local clone of [`DirEntryLoc`] for implementing conversions from [`FuseNodeId`].
 #[repr(transparent)]
 struct FuseDirEntryLoc(DirEntryLoc);
 
-impl TryFrom<FuseNode> for FuseDirEntryLoc {
+impl TryFrom<FuseNodeId> for FuseDirEntryLoc {
     type Error = fuser::Errno;
 
-    fn try_from(value: FuseNode) -> Result<Self, Self::Error> {
+    fn try_from(value: FuseNodeId) -> Result<Self, Self::Error> {
         DirEntryLoc::try_from(value.0)
             .map(Self)
             .map_err(|_| fuser::Errno::EISDIR)
@@ -191,7 +193,7 @@ impl TryFrom<(&FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
     fn try_from((owner, meta): (&FuseMyFileSystem, &NodeMeta)) -> Result<Self, Self::Error> {
         let ctime = SystemTime::from(FuseSystemTime::try_from(meta)?);
         Ok(Self(FileAttr {
-            ino: INodeNo::from(FuseNode::from(meta.node_id)),
+            ino: INodeNo::from(FuseNodeId::from(meta.node_id)),
             size: u64::from(meta.size),
             blocks: u64::from(meta.size).div_ceil(512),
             atime: ctime,
@@ -336,7 +338,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn lookup(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         debug!("lookup(parent={}, name={:?})", parent.0, name);
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, Self::lookup_meta(&fs, parent, name));
@@ -349,7 +351,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn getattr(&self, _: &Request, ino: INodeNo, _: Option<fuser::FileHandle>, reply: ReplyAttr) {
         debug!("getattr(ino={})", ino.0);
-        let node = unwrap_or_reply!(reply, FuseNode::try_from(ino)).0;
+        let node = FuseNodeId::from(ino).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
@@ -378,7 +380,7 @@ impl Filesystem for FuseMyFileSystem {
             return;
         }
         ok_or_reply!(reply, Self::unsupported_non_regular(mode, false));
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         ok_or_reply!(reply, Self::unsupported_special_name(name));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
@@ -406,7 +408,7 @@ impl Filesystem for FuseMyFileSystem {
             parent.0, name, mode
         );
         ok_or_reply!(reply, Self::unsupported_non_regular(mode, true));
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         ok_or_reply!(reply, Self::unsupported_special_name(name));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
@@ -422,7 +424,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn unlink(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         debug!("unlink(parent={}, name={:?})", parent.0, name);
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         ok_or_reply!(reply, Self::unsupported_special_name(name));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
@@ -434,7 +436,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn rmdir(&self, _: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         debug!("rmdir(parent={}, name={:?})", parent.0, name);
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         ok_or_reply!(reply, Self::unsupported_special_name(name));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
@@ -446,7 +448,7 @@ impl Filesystem for FuseMyFileSystem {
 
     fn open(&self, _: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         debug!("open(ino={}, flags={:#x})", ino.0, flags.0);
-        let node = unwrap_or_reply!(reply, FuseNode::try_from(ino)).0;
+        let node = FuseNodeId::from(ino).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
         if meta.kind == NodeKind::Directory {
@@ -469,7 +471,7 @@ impl Filesystem for FuseMyFileSystem {
     ) {
         debug!("read(ino={}, offset={}, size={})", ino.0, offset, size);
         let offset = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(offset));
-        let node = unwrap_or_reply!(reply, FuseNode::try_from(ino));
+        let node = FuseNodeId::from(ino);
         let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(node)).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let data = unwrap_or_reply_fs_error!(reply, fs.read_file_at(loc, offset, size as usize));
@@ -495,7 +497,7 @@ impl Filesystem for FuseMyFileSystem {
             data.len()
         );
         let offset = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(offset));
-        let node = unwrap_or_reply!(reply, FuseNode::try_from(ino));
+        let node = FuseNodeId::from(ino);
         let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(node)).0;
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
         let written = unwrap_or_reply_fs_error!(reply, fs.write_file_at(loc, offset, data)) as u32;
@@ -530,7 +532,7 @@ impl Filesystem for FuseMyFileSystem {
         mut reply: ReplyDirectory,
     ) {
         debug!("readdir(ino={}, offset={})", ino.0, offset);
-        let node = unwrap_or_reply!(reply, FuseNode::try_from(ino)).0;
+        let node = FuseNodeId::from(ino).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
         if meta.kind != NodeKind::Directory {
@@ -540,7 +542,7 @@ impl Filesystem for FuseMyFileSystem {
         let parent = unwrap_or_reply_fs_error!(reply, Self::parent_of(&fs, node));
         if offset < 1
             && reply.add(
-                INodeNo::from(FuseNode::from(node)),
+                INodeNo::from(FuseNodeId::from(node)),
                 1,
                 FileType::Directory,
                 ".",
@@ -551,7 +553,7 @@ impl Filesystem for FuseMyFileSystem {
         }
         if offset < 2
             && reply.add(
-                INodeNo::from(FuseNode::from(parent)),
+                INodeNo::from(FuseNodeId::from(parent)),
                 2,
                 FileType::Directory,
                 "..",
@@ -572,7 +574,7 @@ impl Filesystem for FuseMyFileSystem {
             };
             let next_offset = skip as u64 + idx as u64 + 3;
             if reply.add(
-                INodeNo::from(FuseNode::from(entry.node_id)),
+                INodeNo::from(FuseNodeId::from(entry.node_id)),
                 next_offset,
                 FileType::from(FuseFileType::from(entry.kind)),
                 entry.short_name,
@@ -598,7 +600,7 @@ impl Filesystem for FuseMyFileSystem {
             parent.0, name, mode
         );
         ok_or_reply!(reply, Self::unsupported_non_regular(mode, false));
-        let parent = unwrap_or_reply!(reply, FuseNode::try_from(parent)).0;
+        let parent = FuseNodeId::from(parent).0;
         let name = unwrap_or_reply!(reply, Self::name_str(name));
         ok_or_reply!(reply, Self::unsupported_special_name(name));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());

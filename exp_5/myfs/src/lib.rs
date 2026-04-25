@@ -72,12 +72,16 @@ impl fmt::Display for DirEntryLoc {
 }
 
 /// Session-stable node identifier for higher-level directory traversal APIs.
+/// 
+/// This is comprised of two parts, both coming from [`DirEntryLoc`]:
+/// * Lower 32 bits: `entry_index`
+/// * Higher 32 bits: `dir_start`
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(u64);
 
 impl NodeId {
-    pub const ROOT: Self = Self(0);
+    pub const ROOT: Self = Self(1);
 }
 
 impl From<u64> for NodeId {
