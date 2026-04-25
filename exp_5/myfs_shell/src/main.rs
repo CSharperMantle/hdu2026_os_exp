@@ -155,6 +155,10 @@ impl Shell {
                     .parse::<usize>()?;
                 self.fs.seek(handle, offset)?;
             }
+            "sync" => {
+                self.fs.sync()?;
+                println!("synced");
+            }
             "fat" => print!("{}", self.fs.dump_fat()),
             "stat" => {
                 let target = self
@@ -390,6 +394,7 @@ close <handle|path>
 read <handle> [len]
 write <handle>
 seek <handle> <offset>
+sync
 fat
 stat <path>
 openfiles

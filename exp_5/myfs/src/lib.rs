@@ -282,6 +282,8 @@ impl<'a, D: BlockDevice> Iterator for ChainIter<'a, D> {
 pub struct MyFileSystem<D: BlockDevice> {
     boot: BootSector,
     device: D,
+    fat_m: Vec<FatEntry>,
+    fat_dirty: bool,
     open_files: [Option<OpenFile>; MAX_OPEN_FILES],
     next_handle: u32,
 }
@@ -313,13 +315,20 @@ impl MyFileSystem<MemoryBlockDevice> {
                 usize::from(config.block_count),
             ),
             boot,
+            fat_m: vec![
+                FatEntry::Free;
+                usize::from(config.block_size) * usize::from(fat_block_count)
+                    / FatEntry::SIZE
+            ],
+            fat_dirty: false,
             open_files: std::array::from_fn(|_| None),
             next_handle: 1,
         };
 
         fs.write_boot_sector()?;
-        fs.initialize_fat()?;
-        fs.initialize_root_directory()?;
+        fs.init_fat()?;
+        fs.init_root_dir()?;
+        fs.sync()?;
         Ok(fs)
     }
 }
@@ -575,6 +584,17 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(data.len())
     }
 
+    pub fn sync(&mut self) -> Result<(), FsError> {
+        if !self.fat_dirty {
+            return Ok(());
+        }
+        for copy_idx in 0..self.boot.fat_copies {
+            self.flush_fat(copy_idx)?;
+        }
+        self.fat_dirty = false;
+        Ok(())
+    }
+
     pub fn dump_fat(&self) -> String {
         let mut out = String::new();
         for i in u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()) {
@@ -591,7 +611,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn initialize_fat(&mut self) -> Result<(), FsError> {
+    fn init_fat(&mut self) -> Result<(), FsError> {
         for block in 0..self.boot.fat_block_count {
             self.device
                 .zero_block(BlockId::from(u16::from(self.boot.fat_start_block) + block));
@@ -602,7 +622,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn initialize_root_directory(&mut self) -> Result<(), FsError> {
+    fn init_root_dir(&mut self) -> Result<(), FsError> {
         self.write_fat(self.boot.root_dir_start_cluster, FatEntry::EndOfChain)?;
         self.zero_cluster(self.boot.root_dir_start_cluster)?;
         Ok(())
@@ -706,7 +726,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
             .collect())
     }
 
-    fn fat_block_and_offset(&self, cluster: ClusterId) -> Result<(usize, usize), FsError> {
+    /// Get position of a cluster in the
+    fn fat_pos_of(&self, cluster: ClusterId) -> Result<(usize, usize), FsError> {
         if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
             return Err(FsError::CorruptFs(format!(
                 "cluster {} outside data region",
@@ -720,39 +741,50 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn read_fat(&self, cluster: ClusterId) -> Result<FatEntry, FsError> {
-        let (block_offset, byte_offset) = self.fat_block_and_offset(cluster)?;
-        let block = BlockId::from(
-            u16::from(self.boot.fat_start_block) + u16::try_from(block_offset).unwrap(),
-        );
-        let bytes = self.device.read_block(block);
-        if byte_offset + FatEntry::SIZE > bytes.len() {
-            return Err(FsError::CorruptFs(
-                "fat entry crosses block boundary".to_string(),
-            ));
-        }
-        Ok(FatEntry::from(u16::from_le_bytes([
-            bytes[byte_offset],
-            bytes[byte_offset + 1],
-        ])))
+        // Assert position sanity
+        let _ = self.fat_pos_of(cluster)?;
+        self.fat_m
+            .get(usize::from(u16::from(cluster)))
+            .copied()
+            .ok_or_else(|| FsError::CorruptFs(format!("missing FAT cache entry for {}", cluster)))
     }
 
     fn write_fat(&mut self, cluster: ClusterId, value: FatEntry) -> Result<(), FsError> {
-        let (block_offset, byte_offset) = self.fat_block_and_offset(cluster)?;
-        let fat_bytes = u16::from(value).to_le_bytes();
+        // Assert position sanity
+        let _ = self.fat_pos_of(cluster)?;
+        self.fat_m[usize::from(u16::from(cluster))] = value;
+        self.fat_dirty = true;
+        Ok(())
+    }
 
-        for copy in 0..self.boot.fat_copies {
-            let start = u16::from(self.boot.fat_start_block) + copy * self.boot.fat_block_count;
-            let block = BlockId::from(start + u16::try_from(block_offset).unwrap());
-            self.modify_block(block, |data| {
-                data[byte_offset..byte_offset + 2].copy_from_slice(&fat_bytes);
-            });
+    fn flush_fat(&mut self, copy_idx: u16) -> Result<(), FsError> {
+        let mut bytes = vec![0; usize::from(self.boot.fat_block_count) * self.device.block_size()];
+        for (index, entry) in self.fat_m.iter().copied().enumerate() {
+            let start = index * FatEntry::SIZE;
+            let end = start + FatEntry::SIZE;
+            if end > bytes.len() {
+                return Err(FsError::CorruptFs(
+                    "fat cache larger than on-disk FAT region".to_string(),
+                ));
+            }
+            bytes[start..end].copy_from_slice(&u16::from(entry).to_le_bytes());
+        }
+        let start_block =
+            u16::from(self.boot.fat_start_block) + copy_idx * self.boot.fat_block_count;
+        for block_offset in 0..usize::from(self.boot.fat_block_count) {
+            let start = block_offset * self.device.block_size();
+            let end = start + self.device.block_size();
+            self.device.write_block(
+                BlockId::from(start_block + u16::try_from(block_offset).unwrap()),
+                &bytes[start..end],
+            );
         }
         Ok(())
     }
 
     fn chain_iter(&self, start: ClusterId) -> Result<ChainIter<'_, D>, FsError> {
         if start != ClusterId::FREE {
-            let _ = self.fat_block_and_offset(start)?;
+            let _ = self.fat_pos_of(start)?;
         }
         Ok(ChainIter {
             fs: self,
@@ -789,7 +821,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if start == ClusterId::FREE {
             return Ok(());
         }
-        let _ = self.fat_block_and_offset(start)?;
+        let _ = self.fat_pos_of(start)?;
         let mut visited = HashSet::new();
         let mut current = start;
         loop {
@@ -1042,13 +1074,6 @@ impl<D: BlockDevice> MyFileSystem<D> {
         self.write_chain_bytes(loc.dir_start, self.slot_offset(loc), &bytes)
     }
 
-    /// Perform a read-modify-write procedure.
-    fn modify_block(&mut self, block: BlockId, f: impl FnOnce(&mut [u8])) {
-        let mut bytes = self.device.read_block(block).to_vec();
-        f(&mut bytes);
-        self.device.write_block(block, &bytes);
-    }
-
     fn slot_offset(&self, loc: DirEntryLoc) -> usize {
         usize::try_from(loc.entry_index).unwrap() * Fcb::SIZE
     }
@@ -1152,6 +1177,18 @@ mod tests {
     fn mkmemfs() -> MyFileSystem<MemoryBlockDevice> {
         MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
             .expect("filesystem should format")
+    }
+
+    fn read_fat_copy_bytes(fs: &MyFileSystem<MemoryBlockDevice>, copy: usize) -> Vec<u8> {
+        let fat_start = usize::from(u16::from(fs.boot.fat_start_block));
+        let fat_blocks = usize::from(fs.boot.fat_block_count);
+        let mut out = Vec::with_capacity(fat_blocks * fs.device.block_size());
+        for block in 0..fat_blocks {
+            let block_id =
+                BlockId::from(u16::try_from(fat_start + copy * fat_blocks + block).unwrap());
+            out.extend_from_slice(fs.device.read_block(block_id));
+        }
+        out
     }
 
     #[test]
@@ -1354,18 +1391,36 @@ mod tests {
         fs.write(handle, &payload).unwrap();
         fs.close(handle).unwrap();
         fs.remove_file(file_loc).unwrap();
+        fs.sync().unwrap();
 
-        let fat_start = usize::from(u16::from(fs.boot.fat_start_block));
-        let fat_blocks = usize::from(fs.boot.fat_block_count);
-        for block in 0..fat_blocks {
-            let fat1 = fs
-                .device
-                .read_block(BlockId::from(u16::try_from(fat_start + block).unwrap()));
-            let fat2 = fs.device.read_block(BlockId::from(
-                u16::try_from(fat_start + fat_blocks + block).unwrap(),
-            ));
-            assert_eq!(fat1, fat2);
-        }
+        assert_eq!(read_fat_copy_bytes(&fs, 0), read_fat_copy_bytes(&fs, 1));
+    }
+
+    #[test]
+    fn fat_cache_defers_disk_updates_until_sync() {
+        let mut fs = mkmemfs();
+        let fat1_before = read_fat_copy_bytes(&fs, 0);
+        let fat2_before = read_fat_copy_bytes(&fs, 1);
+
+        let file_loc = fs.create_file(fs.root_dir_cluster(), "CACHE.BIN").unwrap();
+        let handle = fs.open(file_loc).unwrap();
+        fs.write(handle, &[0xAA; 32]).unwrap();
+        fs.close(handle).unwrap();
+
+        assert!(fs.fat_dirty);
+        assert_ne!(
+            fs.read_fat(fs.read_fcb_at(file_loc).unwrap().start_cluster)
+                .unwrap(),
+            FatEntry::Free
+        );
+        assert_eq!(read_fat_copy_bytes(&fs, 0), fat1_before);
+        assert_eq!(read_fat_copy_bytes(&fs, 1), fat2_before);
+
+        fs.sync().unwrap();
+
+        assert!(!fs.fat_dirty);
+        assert_eq!(read_fat_copy_bytes(&fs, 0), read_fat_copy_bytes(&fs, 1));
+        assert_ne!(read_fat_copy_bytes(&fs, 0), fat1_before);
     }
 
     #[test]
