@@ -21,5 +21,8 @@ derive_more = { version = "2.1.1", features = [
     "from",
     "into"
 ] }
+fuser = "0.17.0"
+env_logger = "0.11.10"
+libc = "0.2.177"
 log = "0.4.29"
 thiserror = "2.0.18"

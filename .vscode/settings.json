@@ -5,12 +5,13 @@
         "ctime",
         "mychat",
         "myfs",
-        "myshell"
+        "myshell",
+        "errno"
     ],
     "editor.rulers": [100],
     "rust-analyzer.check.command": "clippy",
     "[rust]": {
         "editor.formatOnSave": true,
         "editor.formatOnSaveMode": "modificationsIfAvailable"
-    },
+    }
 }

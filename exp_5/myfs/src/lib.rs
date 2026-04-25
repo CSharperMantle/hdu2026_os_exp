@@ -80,6 +80,18 @@ impl NodeId {
     pub const ROOT: Self = Self(0);
 }
 
+impl From<u64> for NodeId {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<NodeId> for u64 {
+    fn from(value: NodeId) -> Self {
+        value.0
+    }
+}
+
 impl From<DirEntryLoc> for NodeId {
     fn from(value: DirEntryLoc) -> Self {
         Self((u64::from(u16::from(value.dir_start)) << 32) | u64::from(value.entry_index))
@@ -104,6 +116,17 @@ impl From<NodeId> for DirEntryLocFromNodeIdResult {
                 dir_start: ClusterId::from((value.0 >> 32) as u16),
                 entry_index: value.0 as u32,
             })
+        }
+    }
+}
+
+impl TryFrom<NodeId> for DirEntryLoc {
+    type Error = NodeId;
+
+    fn try_from(value: NodeId) -> Result<Self, Self::Error> {
+        match DirEntryLocFromNodeIdResult::from(value) {
+            DirEntryLocFromNodeIdResult::Root => Err(value),
+            DirEntryLocFromNodeIdResult::Leaf(loc) => Ok(loc),
         }
     }
 }
@@ -551,17 +574,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn stat(&self, loc: DirEntryLoc) -> Result<NodeMeta, FsError> {
         let fcb = self.read_fcb_at(loc)?;
-        let kind = fcb.kind()?;
-        Ok(NodeMeta {
-            node_id: loc.into(),
-            loc: Some(loc),
-            short_name: fcb.short_name(),
-            kind,
-            size: self.size_of(&fcb)?,
-            start_cluster: fcb.start_cluster,
-            ctime: fcb.ctime,
-            cdate: fcb.cdate,
-        })
+        self.node_meta_from_fcb(loc, fcb)
     }
 
     pub fn dir_entries(&self, dir_start: ClusterId) -> Result<DirEntryIter<'_, D>, FsError> {
@@ -737,6 +750,24 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(data)
     }
 
+    pub fn read_file_at(
+        &self,
+        loc: DirEntryLoc,
+        offset: usize,
+        len: usize,
+    ) -> Result<Vec<u8>, FsError> {
+        let fcb = self.read_fcb_at(loc)?;
+        if fcb.kind()? == NodeKind::Directory {
+            return Err(FsError::IsADirectory(fcb.short_name()));
+        }
+        let file_size = usize::try_from(fcb.size).expect("file size must fit into usize");
+        let read_len = len.min(file_size.saturating_sub(offset));
+        if fcb.start_cluster == ClusterId::FREE || read_len == 0 {
+            return Ok(Vec::new());
+        }
+        self.read_chain_bytes(fcb.start_cluster, offset, read_len)
+    }
+
     pub fn write(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
         let slot = self.find_open_slot(handle)?;
         let open = self.open_files[slot].as_ref().expect("open slot").clone();
@@ -768,6 +799,17 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let open_entry = self.open_files[slot].as_mut().expect("open slot");
         open_entry.cursor = new_end;
         open_entry.fcb = fcb;
+        Ok(data.len())
+    }
+
+    pub fn write_file_at(
+        &mut self,
+        loc: DirEntryLoc,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<usize, FsError> {
+        let fcb = self.read_fcb_at(loc)?;
+        let _ = self.write_fcb_data_at(loc, fcb, offset, data)?;
         Ok(data.len())
     }
 
@@ -903,6 +945,55 @@ impl<D: BlockDevice> MyFileSystem<D> {
                 Ok(fcb.start_cluster)
             }
         }
+    }
+
+    fn node_meta_from_fcb(&self, loc: DirEntryLoc, fcb: Fcb) -> Result<NodeMeta, FsError> {
+        let kind = fcb.kind()?;
+        Ok(NodeMeta {
+            node_id: loc.into(),
+            loc: Some(loc),
+            short_name: fcb.short_name(),
+            kind,
+            size: self.size_of(&fcb)?,
+            start_cluster: fcb.start_cluster,
+            ctime: fcb.ctime,
+            cdate: fcb.cdate,
+        })
+    }
+
+    fn write_fcb_data_at(
+        &mut self,
+        loc: DirEntryLoc,
+        mut fcb: Fcb,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<Fcb, FsError> {
+        if fcb.kind()? == NodeKind::Directory {
+            return Err(FsError::IsADirectory(fcb.short_name()));
+        }
+        let new_end = offset
+            .checked_add(data.len())
+            .ok_or(FsError::SeekOutOfBounds(offset))?;
+        let needed_clusters = if new_end == 0 {
+            0
+        } else {
+            new_end.div_ceil(self.cluster_size())
+        };
+
+        fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
+        if !data.is_empty() {
+            self.write_chain_bytes(fcb.start_cluster, offset, data)?;
+        }
+        if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
+            fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
+        }
+        self.write_fcb_at(loc, &fcb)?;
+        for open in self.open_files.iter_mut().flatten() {
+            if open.loc == loc {
+                open.fcb = fcb;
+            }
+        }
+        Ok(fcb)
     }
 
     fn zero_cluster(&mut self, cluster: ClusterId) -> Result<(), FsError> {
