@@ -278,12 +278,7 @@ impl Shell {
     }
 
     fn print_dir(&self, dir_start: ClusterId) -> Result<(), Box<dyn std::error::Error>> {
-        let entries = self.fs.list_dir(dir_start)?;
-        if entries.is_empty() {
-            println!("<empty>");
-            return Ok(());
-        }
-        for entry in entries {
+        for entry in self.fs.list_dir(dir_start)? {
             println!(
                 "{:<4} {:>8} {:>4} {:>8} {}",
                 entry.kind, entry.size, entry.start_cluster, entry.loc, entry.short_name
