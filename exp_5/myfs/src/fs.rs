@@ -17,7 +17,6 @@ pub const DEFAULT_BLOCK_COUNT: u16 = 128;
 pub const DEFAULT_BLOCKS_PER_CLUSTER: u16 = 1;
 pub const MAX_BLOCK_SIZE: usize = 1024;
 pub const ROOT_DIR_START_CLUSTER: ClusterId = ClusterId(2);
-pub const ROOT_DIR_CLUSTER_COUNT: u16 = 2;
 
 /// The ID of a FAT cluster.
 /// TODO: Currently one cluster equals one block. Make it parametric!
@@ -126,15 +125,22 @@ impl From<NodeKind> for FcbAttr {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Zeroable, Pod)]
 pub struct BootSector {
+    /// Block size of this FS.
     pub block_size: u16,
+    /// Number of blocks of the whole disk.
     pub block_count: u16,
+    /// Number of blocks per data cluster.
     pub blocks_per_cluster: u16,
+    /// Starting block ID of the first FAT.
     pub fat_start_block: BlockId,
+    /// Number of blocks allocated for each FAT.
     pub fat_block_count: u16,
+    /// Number of copies of FAT.
     pub fat_copies: u16,
+    /// Starting position of the first data cluster.
     pub data_start_block: BlockId,
+    /// Starting cluster ID of the root directory.
     pub root_dir_start_cluster: ClusterId,
-    pub root_dir_cluster_count: u16,
 }
 
 pub const BOOT_SECTOR_SIZE: usize = std::mem::size_of::<BootSector>();
@@ -252,7 +258,6 @@ mod tests {
             fat_copies: 2,
             data_start_block: BlockId(3),
             root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
-            root_dir_cluster_count: ROOT_DIR_CLUSTER_COUNT,
         };
         assert_eq!(boot.as_bytes().len(), BOOT_SECTOR_SIZE);
         assert_eq!(BootSector::read_from_prefix(boot.as_bytes()).unwrap(), boot);

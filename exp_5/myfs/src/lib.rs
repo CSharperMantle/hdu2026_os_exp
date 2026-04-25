@@ -164,7 +164,7 @@ impl FsConfig {
                 "blocks per cluster must be at least 1".to_string(),
             ));
         }
-        let min_blocks = 1 + 2 + self.blocks_per_cluster * ROOT_DIR_CLUSTER_COUNT;
+        let min_blocks = 1 + 2 + self.blocks_per_cluster;
         if self.block_count <= min_blocks {
             return Err(FsError::InvalidConfig(format!(
                 "block count {} is too small for geometry",
@@ -264,7 +264,6 @@ impl MyFileSystem<MemoryBlockDevice> {
             fat_copies: 2,
             data_start_block: BlockId(1 + fat_block_count * 2),
             root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
-            root_dir_cluster_count: ROOT_DIR_CLUSTER_COUNT,
         };
 
         let mut fs = Self {
@@ -279,7 +278,7 @@ impl MyFileSystem<MemoryBlockDevice> {
 
         fs.write_boot_sector()?;
         fs.initialize_fat()?;
-        fs.reserve_root_directory()?;
+        fs.initialize_root_directory()?;
         Ok(fs)
     }
 }
@@ -563,17 +562,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    fn reserve_root_directory(&mut self) -> Result<(), FsError> {
-        for offset in 0..self.boot.root_dir_cluster_count {
-            let cluster = ClusterId::from(u16::from(self.boot.root_dir_start_cluster) + offset);
-            let next = if offset + 1 == self.boot.root_dir_cluster_count {
-                ClusterId::EOC
-            } else {
-                ClusterId::from(u16::from(cluster) + 1)
-            };
-            self.write_fat_entry(cluster, next)?;
-            self.zero_cluster(cluster)?;
-        }
+    fn initialize_root_directory(&mut self) -> Result<(), FsError> {
+        self.write_fat_entry(self.boot.root_dir_start_cluster, ClusterId::EOC)?;
+        self.zero_cluster(self.boot.root_dir_start_cluster)?;
         Ok(())
     }
 
@@ -1091,9 +1082,9 @@ mod tests {
         assert_eq!(fat1, fat2);
         assert_eq!(
             fs.read_fat_entry(ROOT_DIR_START_CLUSTER).unwrap(),
-            ClusterId(3)
+            ClusterId::EOC
         );
-        assert_eq!(fs.read_fat_entry(ClusterId(3)).unwrap(), ClusterId::EOC);
+        assert_eq!(fs.list_dir(fs.root_dir_cluster()).unwrap().len(), 0);
     }
 
     #[test]
@@ -1107,6 +1098,23 @@ mod tests {
         assert_eq!(fs.boot.blocks_per_cluster, 4);
         assert_eq!(fs.cluster_size(), 512);
         assert_eq!(fs.cluster_blocks(ROOT_DIR_START_CLUSTER).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn root_directory_chain_grows_like_normal_directory() {
+        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 256,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+        for idx in 0..4 {
+            fs.create_file(fs.root_dir_cluster(), &format!("R{idx}.TXT"))
+                .unwrap();
+        }
+        let chain = fs.cluster_chain(fs.root_dir_cluster()).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], ROOT_DIR_START_CLUSTER);
     }
 
     #[test]
