@@ -72,7 +72,7 @@ impl fmt::Display for DirEntryLoc {
 }
 
 /// Session-stable node identifier for higher-level directory traversal APIs.
-/// 
+///
 /// This is comprised of two parts, both coming from [`DirEntryLoc`]:
 /// * Lower 32 bits: `entry_index`
 /// * Higher 32 bits: `dir_start`
@@ -563,13 +563,13 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn lookup(&self, parent_dir: ClusterId, name: &str) -> Result<(DirEntryLoc, Fcb), FsError> {
         let key = normalize_component(name)?;
-        trace!("lookup(parent_dir={}, name={})", parent_dir, key);
+        debug!("lookup(parent_dir={}, name={})", parent_dir, key);
         for slot in self.raw_dir_slots(parent_dir)? {
             let (loc, slot) = slot?;
             if let DirSlot::Occupied(fcb) = slot
                 && fcb.short_name() == key
             {
-                trace!("lookup hit, loc={}", loc);
+                debug!("lookup hit. loc={}", loc);
                 return Ok((loc, fcb));
             }
         }
@@ -819,7 +819,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
 
     pub fn sync(&mut self) -> Result<(), FsError> {
         if !self.fat_dirty {
-            debug!("sync(), not dirty");
+            trace!("sync(), not dirty");
             return Ok(());
         }
         debug!("sync(), dirty");
@@ -843,7 +843,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let mut block = vec![0; usize::from(self.boot.block_size)];
         block[..BOOT_SECTOR_SIZE].copy_from_slice(self.boot.as_bytes());
         self.device.write_block(BlockId(0), &block);
-        debug!(
+        trace!(
             "write_boot_sector(block_size={}, block_count={})",
             self.boot.block_size, self.boot.block_count
         );
@@ -851,7 +851,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     }
 
     fn init_fat(&mut self) -> Result<(), FsError> {
-        debug!(
+        trace!(
             "init_fat(fat_copies={}, fat_block_count={})",
             self.boot.fat_copies, self.boot.fat_block_count
         );
@@ -868,7 +868,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn init_root_dir(&mut self) -> Result<(), FsError> {
         self.write_fat(self.boot.root_dir_start_cluster, FatEntry::EndOfChain)?;
         self.zero_cluster(self.boot.root_dir_start_cluster)?;
-        debug!(
+        trace!(
             "init_root_dir(root_dir_start_cluster={})",
             self.boot.root_dir_start_cluster
         );

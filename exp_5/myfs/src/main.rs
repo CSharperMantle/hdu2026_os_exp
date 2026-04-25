@@ -5,7 +5,7 @@ use chrono::NaiveTime;
 use chrono::Utc;
 use fuser::*;
 use log::debug;
-use log::error;
+use log::warn;
 use myfs::*;
 use std::convert::TryFrom;
 use std::env;
@@ -39,7 +39,7 @@ macro_rules! unwrap_or_reply_fs_error {
         match $expr {
             Ok(value) => value,
             Err(err) => {
-                error!("{}", err);
+                warn!("{}", err);
                 $reply.error(fuser::Errno::from(FuseErrno::from(err)));
                 return;
             }
@@ -59,7 +59,7 @@ macro_rules! ok_or_reply {
 macro_rules! ok_or_reply_fs_error {
     ($reply:ident, $expr:expr) => {
         if let Err(err) = $expr {
-            error!("{}", err);
+            warn!("{}", err);
             $reply.error(fuser::Errno::from(FuseErrno::from(err)));
             return;
         }
