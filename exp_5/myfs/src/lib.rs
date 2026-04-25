@@ -17,6 +17,7 @@ use chrono::NaiveTime;
 use chrono::Utc;
 use log::debug;
 use log::trace;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
@@ -294,14 +295,14 @@ pub struct OpenFile {
     pub fcb: Fcb,
 }
 
-struct ChainIter<'a, D: BlockDevice> {
+struct ChainIter<'a, D: BufferedBlockDevice> {
     fs: &'a MyFileSystem<D>,
     start: ClusterId,
     current: Option<ClusterId>,
     visited: HashSet<ClusterId>,
 }
 
-impl<'a, D: BlockDevice> ChainIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> ChainIter<'a, D> {
     fn new(fs: &'a MyFileSystem<D>, start: ClusterId) -> Result<Self, FsError> {
         if start != ClusterId::FREE {
             let _ = fs.fat_pos_of(start)?;
@@ -315,7 +316,7 @@ impl<'a, D: BlockDevice> ChainIter<'a, D> {
     }
 }
 
-impl<'a, D: BlockDevice> Iterator for ChainIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> Iterator for ChainIter<'a, D> {
     type Item = Result<ClusterId, FsError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -369,7 +370,7 @@ impl<'a, D: BlockDevice> Iterator for ChainIter<'a, D> {
     }
 }
 
-struct RawDirSlotIter<'a, D: BlockDevice> {
+struct RawDirSlotIter<'a, D: BufferedBlockDevice> {
     fs: &'a MyFileSystem<D>,
     dir_start: ClusterId,
     chain_iter: ChainIter<'a, D>,
@@ -379,7 +380,7 @@ struct RawDirSlotIter<'a, D: BlockDevice> {
     entries_per_cluster: usize,
 }
 
-impl<'a, D: BlockDevice> RawDirSlotIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> RawDirSlotIter<'a, D> {
     fn new(fs: &'a MyFileSystem<D>, dir_start: ClusterId) -> Result<Self, FsError> {
         let entries_per_cluster = fs.cluster_size() / Fcb::SIZE;
         trace!(
@@ -398,7 +399,7 @@ impl<'a, D: BlockDevice> RawDirSlotIter<'a, D> {
     }
 }
 
-impl<'a, D: BlockDevice> Iterator for RawDirSlotIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> Iterator for RawDirSlotIter<'a, D> {
     type Item = Result<(DirEntryLoc, DirSlot), FsError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -435,12 +436,12 @@ impl<'a, D: BlockDevice> Iterator for RawDirSlotIter<'a, D> {
     }
 }
 
-pub struct DirEntryIter<'a, D: BlockDevice> {
+pub struct DirEntryIter<'a, D: BufferedBlockDevice> {
     fs: &'a MyFileSystem<D>,
     inner: RawDirSlotIter<'a, D>,
 }
 
-impl<'a, D: BlockDevice> DirEntryIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> DirEntryIter<'a, D> {
     fn new(fs: &'a MyFileSystem<D>, dir_start: ClusterId) -> Result<Self, FsError> {
         Ok(Self {
             fs,
@@ -463,7 +464,7 @@ impl<'a, D: BlockDevice> DirEntryIter<'a, D> {
     }
 }
 
-impl<'a, D: BlockDevice> Iterator for DirEntryIter<'a, D> {
+impl<'a, D: BufferedBlockDevice> Iterator for DirEntryIter<'a, D> {
     type Item = Result<DirEntry, FsError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -481,9 +482,9 @@ impl<'a, D: BlockDevice> Iterator for DirEntryIter<'a, D> {
 }
 
 /// Main object for a mounted MyFileSystem instance.
-pub struct MyFileSystem<D: BlockDevice> {
+pub struct MyFileSystem<D: BufferedBlockDevice> {
     boot: BootSector,
-    device: D,
+    device: RefCell<D>,
     fat_m: Vec<FatEntry>,
     fat_dirty: bool,
     open_files: [Option<OpenFile>; MAX_OPEN_FILES],
@@ -492,7 +493,31 @@ pub struct MyFileSystem<D: BlockDevice> {
 
 impl MyFileSystem<MemoryBlockDevice> {
     pub fn format_memory(config: FsConfig) -> Result<Self, FsError> {
+        let device = MemoryBlockDevice::new(
+            usize::from(config.block_size),
+            usize::from(config.block_count),
+        );
+        Self::format_on_device(device, config)
+    }
+}
+
+impl<D: BufferedBlockDevice> MyFileSystem<D> {
+    pub fn format_on_device(device: D, config: FsConfig) -> Result<Self, FsError> {
         config.validate()?;
+        if device.block_size() != usize::from(config.block_size) {
+            return Err(FsError::InvalidConfig(format!(
+                "device block size {} does not match filesystem block size {}",
+                device.block_size(),
+                config.block_size
+            )));
+        }
+        if device.block_count() != usize::from(config.block_count) {
+            return Err(FsError::InvalidConfig(format!(
+                "device block count {} does not match filesystem block count {}",
+                device.block_count(),
+                config.block_count
+            )));
+        }
 
         let fat_block_count = get_fat_block_count(
             config.block_size,
@@ -511,15 +536,12 @@ impl MyFileSystem<MemoryBlockDevice> {
             root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
         };
         debug!(
-            "format_memory(block_size={}, block_count={}, blocks_per_cluster={}), fat_blocks={}",
+            "format_on_device(block_size={}, block_count={}, blocks_per_cluster={}), fat_blocks={}",
             config.block_size, config.block_count, config.blocks_per_cluster, fat_block_count
         );
 
         let mut fs = Self {
-            device: MemoryBlockDevice::new(
-                usize::from(config.block_size),
-                usize::from(config.block_count),
-            ),
+            device: RefCell::new(device),
             boot,
             fat_m: vec![FatEntry::Free; fat_entry_count(config.block_size, fat_block_count)],
             fat_dirty: false,
@@ -533,9 +555,27 @@ impl MyFileSystem<MemoryBlockDevice> {
         fs.sync()?;
         Ok(fs)
     }
-}
 
-impl<D: BlockDevice> MyFileSystem<D> {
+    pub fn open_on_device(mut device: D) -> Result<Self, FsError> {
+        let boot = read_boot_sector_from_device(&mut device)?;
+        validate_boot_sector_against_device(&boot, &device)?;
+        let fat_m = read_fat_cache_from_device(&mut device, &boot)?;
+
+        debug!(
+            "open_on_device(block_size={}, block_count={}, blocks_per_cluster={}), fat_blocks={}",
+            boot.block_size, boot.block_count, boot.blocks_per_cluster, boot.fat_block_count
+        );
+
+        Ok(Self {
+            boot,
+            device: RefCell::new(device),
+            fat_m,
+            fat_dirty: false,
+            open_files: std::array::from_fn(|_| None),
+            next_handle: 1,
+        })
+    }
+
     pub fn boot_sector(&self) -> &BootSector {
         &self.boot
     }
@@ -856,7 +896,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn write_boot_sector(&mut self) -> Result<(), FsError> {
         let mut block = vec![0; usize::from(self.boot.block_size)];
         block[..BOOT_SECTOR_SIZE].copy_from_slice(self.boot.as_bytes());
-        self.device.write_block(BlockId(0), &block);
+        self.write_device_block(BlockId(0), &block)?;
         trace!(
             "write_boot_sector(block_size={}, block_count={})",
             self.boot.block_size, self.boot.block_count
@@ -872,8 +912,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for copy in 0..self.boot.fat_copies {
             let start = self.fat_start_block_of(copy);
             for block in 0..self.boot.fat_block_count {
-                self.device
-                    .zero_block(BlockId::from(u16::from(start) + block));
+                self.zero_device_block(BlockId::from(u16::from(start) + block))?;
             }
         }
         Ok(())
@@ -1015,9 +1054,23 @@ impl<D: BlockDevice> MyFileSystem<D> {
         Ok(fcb)
     }
 
+    fn read_device_block(&self, block: BlockId) -> Result<Vec<u8>, FsError> {
+        let mut out = vec![0; usize::from(self.boot.block_size)];
+        self.device.borrow_mut().read_block_into(block, &mut out)?;
+        Ok(out)
+    }
+
+    fn write_device_block(&self, block: BlockId, data: &[u8]) -> Result<(), FsError> {
+        self.device.borrow_mut().write_block_from(block, data)
+    }
+
+    fn zero_device_block(&self, block: BlockId) -> Result<(), FsError> {
+        self.device.borrow_mut().zero_block(block)
+    }
+
     fn zero_cluster(&mut self, cluster: ClusterId) -> Result<(), FsError> {
         for block in self.cluster_blocks(cluster)? {
-            self.device.zero_block(block);
+            self.zero_device_block(block)?;
         }
         Ok(())
     }
@@ -1120,10 +1173,10 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for block_offset in 0..usize::from(self.boot.fat_block_count) {
             let start = block_offset * usize::from(self.boot.block_size);
             let end = start + usize::from(self.boot.block_size);
-            self.device.write_block(
+            self.write_device_block(
                 BlockId::from(u16::from(start_block) + u16::try_from(block_offset).unwrap()),
                 &bytes[start..end],
-            );
+            )?;
         }
         Ok(())
     }
@@ -1370,7 +1423,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
     fn read_cluster_bytes(&self, cluster: ClusterId) -> Result<Vec<u8>, FsError> {
         let mut out = Vec::with_capacity(self.cluster_size());
         for block in self.cluster_blocks(cluster)? {
-            out.extend_from_slice(self.device.read_block(block));
+            out.extend_from_slice(&self.read_device_block(block)?);
         }
         Ok(out)
     }
@@ -1384,7 +1437,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         for (idx, block) in self.cluster_blocks(cluster)?.into_iter().enumerate() {
             let start = idx * usize::from(self.boot.block_size);
             let end = start + usize::from(self.boot.block_size);
-            self.device.write_block(block, &data[start..end]);
+            self.write_device_block(block, &data[start..end])?;
         }
         Ok(())
     }
@@ -1531,23 +1584,132 @@ fn fat_entry_count(block_size: u16, fat_block_count: u16) -> usize {
     usize::from(block_size) * usize::from(fat_block_count) / FatEntry::SIZE
 }
 
+fn read_boot_sector_from_device<D: BufferedBlockDevice>(
+    device: &mut D,
+) -> Result<BootSector, FsError> {
+    let mut block = vec![0; device.block_size()];
+    device.read_block_into(BlockId(0), &mut block)?;
+    BootSector::read_from_prefix(&block)
+}
+
+fn validate_boot_sector_against_device<D: BufferedBlockDevice>(
+    boot: &BootSector,
+    device: &D,
+) -> Result<(), FsError> {
+    if usize::from(boot.block_size) != device.block_size() {
+        return Err(FsError::CorruptFs(format!(
+            "boot sector block size {} does not match device block size {}",
+            boot.block_size,
+            device.block_size()
+        )));
+    }
+    if usize::from(boot.block_count) != device.block_count() {
+        return Err(FsError::CorruptFs(format!(
+            "boot sector block count {} does not match device block count {}",
+            boot.block_count,
+            device.block_count()
+        )));
+    }
+    FsConfig {
+        block_size: boot.block_size,
+        block_count: boot.block_count,
+        blocks_per_cluster: boot.blocks_per_cluster,
+    }
+    .validate()?;
+
+    let expected_fat_block_count = get_fat_block_count(
+        boot.block_size,
+        boot.block_count,
+        boot.fat_copies,
+        boot.blocks_per_cluster,
+    );
+    if boot.fat_block_count != expected_fat_block_count {
+        return Err(FsError::CorruptFs(format!(
+            "boot sector fat block count {} does not match computed value {}",
+            boot.fat_block_count, expected_fat_block_count
+        )));
+    }
+    if boot.fat_start_block != BlockId(1) {
+        return Err(FsError::CorruptFs(format!(
+            "unexpected fat start block {}",
+            boot.fat_start_block
+        )));
+    }
+    if boot.data_start_block != BlockId(1 + boot.fat_copies * boot.fat_block_count) {
+        return Err(FsError::CorruptFs(format!(
+            "unexpected data start block {}",
+            boot.data_start_block
+        )));
+    }
+    if boot.root_dir_start_cluster != ROOT_DIR_START_CLUSTER {
+        return Err(FsError::CorruptFs(format!(
+            "unexpected root dir start cluster {}",
+            boot.root_dir_start_cluster
+        )));
+    }
+    Ok(())
+}
+
+fn read_fat_cache_from_device<D: BufferedBlockDevice>(
+    device: &mut D,
+    boot: &BootSector,
+) -> Result<Vec<FatEntry>, FsError> {
+    let mut fat_bytes = vec![0; usize::from(boot.block_size) * usize::from(boot.fat_block_count)];
+    for block_offset in 0..usize::from(boot.fat_block_count) {
+        let start = block_offset * usize::from(boot.block_size);
+        let end = start + usize::from(boot.block_size);
+        device.read_block_into(
+            BlockId::from(u16::from(boot.fat_start_block) + u16::try_from(block_offset).unwrap()),
+            &mut fat_bytes[start..end],
+        )?;
+    }
+
+    let mut fat_m = Vec::with_capacity(fat_entry_count(boot.block_size, boot.fat_block_count));
+    for chunk in fat_bytes.chunks_exact(FatEntry::SIZE) {
+        let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
+        fat_m.push(FatEntry::from(raw));
+    }
+    Ok(fat_m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
+    use tempfile::tempdir;
 
     fn mkmemfs() -> MyFileSystem<MemoryBlockDevice> {
         MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
             .expect("filesystem should format")
     }
 
+    fn mkfiledev(
+        path: &std::path::Path,
+        block_size: usize,
+        block_count: usize,
+    ) -> LogicalBlockDevice<FileBlockDevice> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        LogicalBlockDevice::new(
+            FileBlockDevice::create(file, block_size, block_count).unwrap(),
+            block_size,
+        )
+        .unwrap()
+    }
+
     fn read_fat_copy_bytes(fs: &MyFileSystem<MemoryBlockDevice>, copy: usize) -> Vec<u8> {
         let fat_start = usize::from(u16::from(fs.boot.fat_start_block));
         let fat_blocks = usize::from(fs.boot.fat_block_count);
-        let mut out = Vec::with_capacity(fat_blocks * fs.device.block_size());
+        let mut out = Vec::with_capacity(fat_blocks * usize::from(fs.boot.block_size));
         for block in 0..fat_blocks {
             let block_id =
                 BlockId::from(u16::try_from(fat_start + copy * fat_blocks + block).unwrap());
-            out.extend_from_slice(fs.device.read_block(block_id));
+            out.extend_from_slice(&fs.read_device_block(block_id).unwrap());
         }
         out
     }
@@ -1639,20 +1801,116 @@ mod tests {
     #[test]
     fn format_writes_boot_and_two_fat_copies() {
         let fs = mkmemfs();
-        let boot_block = fs.device.read_block(BlockId(0));
+        let boot_block = fs.read_device_block(BlockId(0)).unwrap();
         assert_eq!(
             u16::from_le_bytes([boot_block[0], boot_block[1]]),
             DEFAULT_BLOCK_SIZE as u16
         );
 
-        let fat1 = fs.device.read_block(BlockId(1)).to_vec();
-        let fat2 = fs.device.read_block(BlockId(2)).to_vec();
+        let fat1 = fs.read_device_block(BlockId(1)).unwrap();
+        let fat2 = fs.read_device_block(BlockId(2)).unwrap();
         assert_eq!(fat1, fat2);
         assert_eq!(
             fs.read_fat(ROOT_DIR_START_CLUSTER).unwrap(),
             FatEntry::EndOfChain
         );
         assert_eq!(collect_dir_entries(&fs, fs.root_dir_cluster()).len(), 0);
+    }
+
+    #[test]
+    fn open_on_device_reads_formatted_image() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("open-on-device.img");
+        let config = FsConfig {
+            block_size: 128,
+            block_count: 256,
+            blocks_per_cluster: 2,
+        };
+
+        let mut fs = MyFileSystem::format_on_device(
+            mkfiledev(
+                &path,
+                usize::from(config.block_size),
+                usize::from(config.block_count),
+            ),
+            config.clone(),
+        )
+        .unwrap();
+        fs.create_file(fs.root_dir_cluster(), "HELLO.TXT").unwrap();
+        fs.sync().unwrap();
+        drop(fs);
+
+        let reopened = MyFileSystem::open_on_device(
+            LogicalBlockDevice::new(
+                FileBlockDevice::from_file(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .unwrap(),
+                    usize::from(config.block_size),
+                )
+                .unwrap(),
+                usize::from(config.block_size),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(reopened.boot_sector().block_size, config.block_size);
+        assert_eq!(reopened.boot_sector().block_count, config.block_count);
+        assert!(
+            reopened
+                .lookup(reopened.root_dir_cluster(), "HELLO.TXT")
+                .is_ok()
+        );
+        assert_eq!(
+            reopened.read_fat(ROOT_DIR_START_CLUSTER).unwrap(),
+            FatEntry::EndOfChain
+        );
+    }
+
+    #[test]
+    fn file_backed_round_trip_persists_file_data() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file-backed-round-trip.img");
+        let config = FsConfig::default();
+
+        let mut fs = MyFileSystem::format_on_device(
+            mkfiledev(
+                &path,
+                usize::from(config.block_size),
+                usize::from(config.block_count),
+            ),
+            config.clone(),
+        )
+        .unwrap();
+        let loc = fs.create_file(fs.root_dir_cluster(), "NOTE.TXT").unwrap();
+        fs.write_file_at(loc, 0, b"abc123").unwrap();
+        fs.sync().unwrap();
+        drop(fs);
+
+        let reopened = MyFileSystem::open_on_device(
+            LogicalBlockDevice::new(
+                FileBlockDevice::from_file(
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .unwrap(),
+                    usize::from(config.block_size),
+                )
+                .unwrap(),
+                usize::from(config.block_size),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (loc, _) = reopened
+            .lookup(reopened.root_dir_cluster(), "NOTE.TXT")
+            .unwrap();
+        let data = reopened.read_file_at(loc, 0, 64).unwrap();
+        assert_eq!(data, b"abc123");
     }
 
     #[test]
