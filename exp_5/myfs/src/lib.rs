@@ -10,6 +10,10 @@ pub use fat::*;
 pub use fs::*;
 pub use name::*;
 
+use chrono::DateTime;
+use chrono::NaiveDate;
+use chrono::NaiveDateTime;
+use chrono::NaiveTime;
 use chrono::Utc;
 use log::debug;
 use log::trace;
@@ -222,6 +226,7 @@ pub struct DirEntry {
     pub kind: NodeKind,
     pub size: u32,
     pub start_cluster: ClusterId,
+    pub cdatetime: NaiveDateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -437,6 +442,9 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let mut entries = Vec::new();
         for (loc, slot) in self.scan_dir(dir_start)? {
             if let DirSlot::Occupied(fcb) = slot {
+                let cdate = NaiveDate::try_from(fcb.cdate)?;
+                let ctime = NaiveTime::try_from(fcb.ctime)?;
+                let cdatetime = NaiveDateTime::new(cdate, ctime);
                 entries.push(DirEntry {
                     node_id: loc.into(),
                     loc,
@@ -444,6 +452,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
                     kind: fcb.kind()?,
                     size: self.size_of(&fcb)?,
                     start_cluster: fcb.start_cluster,
+                    cdatetime,
                 });
             }
         }

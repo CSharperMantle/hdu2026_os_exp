@@ -289,8 +289,13 @@ impl Shell {
     fn print_dir(&self, dir_start: ClusterId) -> Result<()> {
         for entry in self.fs.list_dir(dir_start)? {
             println!(
-                "{:<4} {:>8} {:>4} {:>8} {}",
-                entry.kind, entry.size, entry.start_cluster, entry.loc, entry.short_name
+                "{}\t<{}>\t{}\t{}\t{}\t{}",
+                entry.cdatetime,
+                entry.kind,
+                entry.size,
+                entry.start_cluster,
+                entry.loc,
+                entry.short_name
             );
         }
         Ok(())
