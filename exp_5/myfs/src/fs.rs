@@ -2,6 +2,12 @@
 
 use bytemuck::Pod;
 use bytemuck::Zeroable;
+use chrono::DateTime;
+use chrono::Datelike;
+use chrono::NaiveDate;
+use chrono::NaiveTime;
+use chrono::Timelike;
+use chrono::Utc;
 use derive_more::Deref;
 use derive_more::DerefMut;
 use derive_more::Display;
@@ -63,6 +69,118 @@ pub struct BlockId(pub u16);
 )]
 #[display("{_0}")]
 pub struct FileHandle(pub u32);
+
+/// A timezone-less date with reduced representable range packed into an [`u16`].
+#[repr(transparent)]
+#[derive(Deref, DerefMut, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod)]
+pub struct U16Date(u16);
+
+impl U16Date {
+    pub const EMPTY: Self = Self(0);
+}
+
+impl TryFrom<NaiveDate> for U16Date {
+    type Error = FsError;
+
+    fn try_from(value: NaiveDate) -> Result<Self, Self::Error> {
+        let year = value.year();
+        if !(1980..=2107).contains(&year) {
+            return Err(FsError::InvalidConfig(format!(
+                "date {value} outside FAT range"
+            )));
+        }
+        let year = u16::try_from(year - 1980).unwrap() & 0x7F; // 7 bits
+        let month = u16::try_from(value.month()).unwrap() & 0x0F; // 4 bits
+        let day = u16::try_from(value.day()).unwrap() & 0x1F; // 5 bits
+        Ok(Self((year << 9) | (month << 5) | day))
+    }
+}
+
+impl TryFrom<U16Date> for NaiveDate {
+    type Error = FsError;
+
+    fn try_from(value: U16Date) -> Result<Self, Self::Error> {
+        if value == U16Date::EMPTY {
+            return Err(FsError::CorruptFs("empty FAT date".to_string()));
+        }
+        let raw = u16::from(value);
+        let year = 1980 + i32::from((raw >> 9) & 0x7F); // 7 bits
+        let month = u32::from((raw >> 5) & 0x0F); // 4 bits
+        let day = u32::from(raw & 0x1F); // 5 bits
+        NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or_else(|| FsError::CorruptFs(format!("invalid FAT date: {raw:#06x}")))
+    }
+}
+
+impl TryFrom<DateTime<Utc>> for U16Date {
+    type Error = FsError;
+
+    fn try_from(value: DateTime<Utc>) -> Result<Self, Self::Error> {
+        U16Date::try_from(value.naive_utc().date())
+    }
+}
+
+impl fmt::Display for U16Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match NaiveDate::try_from(*self) {
+            Ok(date) => write!(f, "{date}"),
+            Err(_) => write!(f, "<unset>"),
+        }
+    }
+}
+
+/// A timezone-less time packed into an [`u16`].
+#[repr(transparent)]
+#[derive(Deref, DerefMut, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod)]
+pub struct U16Time(u16);
+
+impl U16Time {
+    pub const EMPTY: Self = Self(0);
+}
+
+impl TryFrom<NaiveTime> for U16Time {
+    type Error = FsError;
+
+    fn try_from(value: NaiveTime) -> Result<Self, Self::Error> {
+        let hour = u16::try_from(value.hour()).unwrap() & 0x1F; // 5 bits
+        let minute = u16::try_from(value.minute()).unwrap() & 0x3F; // 6 bits
+        let second_div2 = u16::try_from(value.second() >> 1).unwrap() & 0x1F; // 5 bits
+        Ok(Self((hour << 11) | (minute << 5) | second_div2))
+    }
+}
+
+impl TryFrom<U16Time> for NaiveTime {
+    type Error = FsError;
+
+    fn try_from(value: U16Time) -> Result<Self, Self::Error> {
+        if value == U16Time::EMPTY {
+            return Err(FsError::CorruptFs("empty FAT time".to_string()));
+        }
+        let raw = u16::from(value);
+        let hour = u32::from((raw >> 11) & 0x1F); // 5 bits
+        let minute = u32::from((raw >> 5) & 0x3F); // 6 bits
+        let second = u32::from(raw & 0x1F) << 1; // 5 bits
+        NaiveTime::from_hms_opt(hour, minute, second)
+            .ok_or_else(|| FsError::CorruptFs(format!("invalid FAT time: {raw:#06x}")))
+    }
+}
+
+impl TryFrom<DateTime<Utc>> for U16Time {
+    type Error = FsError;
+
+    fn try_from(value: DateTime<Utc>) -> Result<Self, Self::Error> {
+        Self::try_from(value.naive_utc().time())
+    }
+}
+
+impl fmt::Display for U16Time {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match NaiveTime::try_from(*self) {
+            Ok(time) => write!(f, "{}", time.format("%H:%M:%S")),
+            Err(_) => write!(f, "<unset>"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -166,8 +284,8 @@ pub struct Fcb {
     pub short_name: ShortName,
     pub attr: FcbAttr,
     pub reserved: u8,
-    pub ctime: u16,
-    pub cdate: u16,
+    pub ctime: U16Time,
+    pub cdate: U16Date,
     pub start_cluster: ClusterId,
     pub size: u32,
 }
@@ -180,13 +298,14 @@ impl Fcb {
         kind: NodeKind,
         start_cluster: ClusterId,
         size: u32,
+        cdatetime: DateTime<Utc>,
     ) -> Result<Self, FsError> {
         Ok(Self {
             short_name: ShortName::try_from(name)?,
             attr: kind.into(),
             reserved: 0,
-            ctime: 0,
-            cdate: 0,
+            ctime: cdatetime.try_into()?,
+            cdate: cdatetime.try_into()?,
             start_cluster,
             size,
         })
@@ -238,13 +357,13 @@ mod tests {
 
     #[test]
     fn fcb_new_keeps_requested_minimal_fields() {
-        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0).unwrap();
-        assert_eq!(fcb.ctime, 0);
-        assert_eq!(fcb.cdate, 0);
+        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0, Utc::now()).unwrap();
         assert_eq!(fcb.attr, FcbAttr::FILE);
         assert_eq!(fcb.start_cluster, ClusterId::FREE);
         assert_eq!(fcb.size, 0);
         assert_eq!(fcb.short_name(), "A.TXT");
+        assert_ne!(fcb.ctime, U16Time::EMPTY);
+        assert_ne!(fcb.cdate, U16Date::EMPTY);
     }
 
     #[test]
@@ -265,15 +384,33 @@ mod tests {
 
     #[test]
     fn fcb_bytes_round_trip() {
-        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId(7), 123).unwrap();
+        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId(7), 123, Utc::now()).unwrap();
         assert_eq!(fcb.as_bytes().len(), Fcb::SIZE);
         assert_eq!(Fcb::read_from_bytes(fcb.as_bytes()).unwrap(), fcb);
     }
 
     #[test]
     fn write_to_slice_rejects_short_buffer() {
-        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0).unwrap();
+        let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId::FREE, 0, Utc::now()).unwrap();
         let mut short = [0u8; Fcb::SIZE - 1];
         assert!(fcb.write_to_slice(&mut short).is_err());
+    }
+
+    #[test]
+    fn u16_date_converts_both_ways() {
+        let date = NaiveDate::from_ymd_opt(2026, 4, 25).unwrap();
+        let encoded = U16Date::try_from(date).unwrap();
+        assert_eq!(NaiveDate::try_from(encoded).unwrap(), date);
+    }
+
+    #[test]
+    fn u16_time_converts_both_ways() {
+        let time = NaiveTime::from_hms_opt(12, 34, 56).unwrap();
+        let encoded = U16Time::try_from(time).unwrap();
+        assert_eq!(NaiveTime::try_from(encoded).unwrap(), time);
+        // Should even out the LSB of second
+        let time_odd = NaiveTime::from_hms_opt(12, 34, 57).unwrap();
+        let encoded_odd = U16Time::try_from(time_odd).unwrap();
+        assert_eq!(NaiveTime::try_from(encoded_odd).unwrap(), time);
     }
 }

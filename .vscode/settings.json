@@ -1,10 +1,11 @@
 {
     "cSpell.words": [
-        "myfs",
-        "myshell",
-        "mychat",
-        "ctime",
         "cdate",
+        "cdatetime",
+        "ctime",
+        "mychat",
+        "myfs",
+        "myshell"
     ],
     "editor.rulers": [100],
     "rust-analyzer.check.command": "clippy",

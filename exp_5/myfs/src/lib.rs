@@ -10,6 +10,7 @@ pub use fat::*;
 pub use fs::*;
 pub use name::*;
 
+use chrono::Utc;
 use std::collections::HashSet;
 use std::error;
 use std::fmt;
@@ -189,8 +190,8 @@ pub struct NodeMeta {
     pub kind: NodeKind,
     pub size: u32,
     pub start_cluster: ClusterId,
-    pub ctime: u16,
-    pub cdate: u16,
+    pub ctime: U16Time,
+    pub cdate: U16Date,
 }
 
 /// An entry of the directory returned by [`MyFileSystem::list_dir`].
@@ -353,8 +354,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
             kind: NodeKind::Directory,
             size: self.dir_size(self.root_dir_cluster())?,
             start_cluster: self.root_dir_cluster(),
-            ctime: 0,
-            cdate: 0,
+            ctime: U16Time::EMPTY,
+            cdate: U16Date::EMPTY,
         })
     }
 
@@ -438,7 +439,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
             return Err(FsError::InvalidPath(format!("{key} already exists")));
         }
         let loc = self.find_free_dir_slot(parent_dir)?;
-        let fcb = Fcb::new(&key, NodeKind::File, ClusterId::FREE, 0)?;
+        let fcb = Fcb::new(&key, NodeKind::File, ClusterId::FREE, 0, Utc::now())?;
         self.write_fcb_at(loc, &fcb)?;
         self.update_dir_size_on_disk(parent_dir)?;
         Ok(loc)
@@ -451,7 +452,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         }
         let new_cluster = self.allocate_clusters(1)?[0];
         let loc = self.find_free_dir_slot(parent_dir)?;
-        let fcb = Fcb::new(&key, NodeKind::Directory, new_cluster, 0)?;
+        let fcb = Fcb::new(&key, NodeKind::Directory, new_cluster, 0, Utc::now())?;
         self.write_fcb_at(loc, &fcb)?;
         self.update_dir_size_on_disk(parent_dir)?;
         Ok(loc)
