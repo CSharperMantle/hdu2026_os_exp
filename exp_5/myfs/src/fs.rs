@@ -281,8 +281,8 @@ pub struct Fcb {
     pub short_name: ShortName,
     pub attr: FcbAttr,
     pub reserved: u8,
-    pub ctime: U16Time,
-    pub cdate: U16Date,
+    pub mtime: U16Time,
+    pub mdate: U16Date,
     pub start_cluster: ClusterId,
     pub size: u32,
 }
@@ -295,14 +295,14 @@ impl Fcb {
         kind: NodeKind,
         start_cluster: ClusterId,
         size: u32,
-        cdatetime: DateTime<Utc>,
+        mdatetime: DateTime<Utc>,
     ) -> Result<Self, FsError> {
         Ok(Self {
             short_name: ShortName::try_from(name)?,
             attr: kind.into(),
             reserved: 0,
-            ctime: cdatetime.try_into()?,
-            cdate: cdatetime.try_into()?,
+            mtime: mdatetime.try_into()?,
+            mdate: mdatetime.try_into()?,
             start_cluster,
             size,
         })
@@ -334,6 +334,17 @@ impl Fcb {
             .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
         Ok(bytemuck::pod_read_unaligned(bytes))
     }
+
+    pub(crate) fn set_mdatetime(&mut self, mdatetime: DateTime<Utc>) -> Result<(), FsError> {
+        self.mtime = mdatetime.try_into()?;
+        self.mdate = mdatetime.try_into()?;
+        Ok(())
+    }
+
+    pub(crate) fn touch(&mut self) -> Result<(), FsError> {
+        self.set_mdatetime(Utc::now())?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -359,8 +370,8 @@ mod tests {
         assert_eq!(fcb.start_cluster, ClusterId::FREE);
         assert_eq!(fcb.size, 0);
         assert_eq!(fcb.short_name(), "A.TXT");
-        assert_ne!(fcb.ctime, U16Time::EMPTY);
-        assert_ne!(fcb.cdate, U16Date::EMPTY);
+        assert_ne!(fcb.mtime, U16Time::EMPTY);
+        assert_ne!(fcb.mdate, U16Date::EMPTY);
     }
 
     #[test]

@@ -291,7 +291,7 @@ impl Shell {
             let entry = entry?;
             println!(
                 "{}\t<{}>\t{}\t{}\t{}\t{}",
-                entry.cdatetime,
+                entry.mdatetime,
                 entry.kind,
                 entry.size,
                 entry.start_cluster,
@@ -318,8 +318,8 @@ impl Shell {
         println!("type: {}", entry.kind);
         println!("size: {}", entry.size);
         println!("start_cluster: {}", entry.start_cluster);
-        println!("ctime: {}", entry.ctime);
-        println!("cdate: {}", entry.cdate);
+        println!("mtime: {}", entry.mtime);
+        println!("mdate: {}", entry.mdate);
     }
 
     fn print_open_files(&self) {

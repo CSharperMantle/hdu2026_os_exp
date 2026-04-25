@@ -66,6 +66,12 @@ macro_rules! ok_or_reply_fs_error {
     };
 }
 
+macro_rules! any_some {
+    ($($opt:expr),+ $(,)?) => {
+        $( $opt.is_some() )||+
+    };
+}
+
 /// Local clone of [`NodeId`] for implementing conversions from [`INodeNo`].
 #[repr(transparent)]
 struct FuseNodeId(NodeId);
@@ -164,21 +170,40 @@ impl TryFrom<&myfs::NodeMeta> for FuseSystemTime {
     type Error = FsError;
 
     fn try_from(value: &myfs::NodeMeta) -> Result<Self, Self::Error> {
-        if value.cdate == U16Date::EMPTY || value.ctime == U16Time::EMPTY {
+        if value.mdate == U16Date::EMPTY || value.mtime == U16Time::EMPTY {
             return Ok(Self(UNIX_EPOCH));
         }
-        let cdate = NaiveDate::try_from(value.cdate)?;
-        let ctime = NaiveTime::try_from(value.ctime)?;
-        let cdatetime = NaiveDateTime::new(cdate, ctime);
-        let cdatetime = DateTime::<Utc>::from_naive_utc_and_offset(cdatetime, Utc);
+        let mdate = NaiveDate::try_from(value.mdate)?;
+        let mtime = NaiveTime::try_from(value.mtime)?;
+        let mdatetime = NaiveDateTime::new(mdate, mtime);
+        let mdatetime = DateTime::<Utc>::from_naive_utc_and_offset(mdatetime, Utc);
         Ok(Self(
-            UNIX_EPOCH + Duration::from_secs(cdatetime.timestamp() as u64),
+            UNIX_EPOCH + Duration::from_secs(mdatetime.timestamp() as u64),
         ))
     }
 }
 
 impl From<FuseSystemTime> for SystemTime {
     fn from(value: FuseSystemTime) -> Self {
+        value.0
+    }
+}
+
+/// Local clone of [`DateTime<Utc>`] for implementing conversions from [`TimeOrNow`].
+#[repr(transparent)]
+struct FuseDateTimeUtc(DateTime<Utc>);
+
+impl From<TimeOrNow> for FuseDateTimeUtc {
+    fn from(value: TimeOrNow) -> Self {
+        match value {
+            TimeOrNow::Now => Self(Utc::now()),
+            TimeOrNow::SpecificTime(value) => Self(DateTime::<Utc>::from(value)),
+        }
+    }
+}
+
+impl From<FuseDateTimeUtc> for DateTime<Utc> {
+    fn from(value: FuseDateTimeUtc) -> Self {
         value.0
     }
 }
@@ -193,15 +218,15 @@ impl TryFrom<(&Request, &FuseMyFileSystem, &NodeMeta)> for FuseFileAttr {
     fn try_from(
         (req, owner, meta): (&Request, &FuseMyFileSystem, &NodeMeta),
     ) -> Result<Self, Self::Error> {
-        let ctime = SystemTime::from(FuseSystemTime::try_from(meta)?);
+        let mtime = SystemTime::from(FuseSystemTime::try_from(meta)?);
         Ok(Self(FileAttr {
             ino: INodeNo::from(FuseNodeId::from(meta.node_id)),
             size: u64::from(meta.size),
             blocks: u64::from(meta.size).div_ceil(512),
-            atime: ctime,
-            mtime: ctime,
-            ctime,
-            crtime: ctime,
+            atime: mtime,
+            mtime,
+            ctime: mtime,
+            crtime: SystemTime::UNIX_EPOCH,
             kind: FileType::from(FuseFileType::from(meta.kind)),
             perm: 0o755,
             nlink: match meta.kind {
@@ -353,6 +378,56 @@ impl Filesystem for FuseMyFileSystem {
         let node = FuseNodeId::from(ino).0;
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
+        let attr = FileAttr::from(unwrap_or_reply_fs_error!(
+            reply,
+            FuseFileAttr::try_from((req, self, &meta))
+        ));
+        reply.attr(&TTL_ZERO, &attr);
+    }
+
+    fn setattr(
+        &self,
+        req: &Request,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        ctime: Option<SystemTime>,
+        fh: Option<fuser::FileHandle>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<BsdFileFlags>,
+        reply: ReplyAttr,
+    ) {
+        debug!(
+            "setattr(ino={}), mode={:?}, uid={:?}, gid={:?}, size={:?}, atime={:?}, mtime={:?}, ctime={:?}, fh={:?}, crtime={:?}, chgtime={:?}, bkuptime={:?}, flags={:?}",
+            ino.0, mode, uid, gid, size, atime, mtime, ctime, crtime, fh, chgtime, bkuptime, flags
+        );
+        if any_some!(mode, uid, gid, size, fh, crtime, chgtime, bkuptime, flags) {
+            reply.error(fuser::Errno::EOPNOTSUPP);
+            return;
+        }
+
+        let mtime = mtime
+            .or(ctime.map(TimeOrNow::SpecificTime))
+            .or(atime)
+            .expect("one of mtime, ctime, or atime must be set");
+        let node = FuseNodeId::from(ino).0;
+        if node == NodeId::ROOT {
+            reply.error(fuser::Errno::EOPNOTSUPP);
+            return;
+        }
+        let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(FuseNodeId::from(node))).0;
+        let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        ok_or_reply_fs_error!(
+            reply,
+            fs.set_mtime(loc, DateTime::<Utc>::from(FuseDateTimeUtc::from(mtime)))
+        );
+        let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
             FuseFileAttr::try_from((req, self, &meta))

@@ -240,8 +240,8 @@ pub struct NodeMeta {
     pub kind: NodeKind,
     pub size: u32,
     pub start_cluster: ClusterId,
-    pub ctime: U16Time,
-    pub cdate: U16Date,
+    pub mtime: U16Time,
+    pub mdate: U16Date,
 }
 
 /// An entry yielded by [`DirEntryIter`].
@@ -253,7 +253,7 @@ pub struct DirEntry {
     pub kind: NodeKind,
     pub size: u32,
     pub start_cluster: ClusterId,
-    pub cdatetime: NaiveDateTime,
+    pub mdatetime: NaiveDateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -449,8 +449,8 @@ impl<'a, D: BlockDevice> DirEntryIter<'a, D> {
     }
 
     fn dir_entry_from_fcb(&self, loc: DirEntryLoc, fcb: Fcb) -> Result<DirEntry, FsError> {
-        let cdate = NaiveDate::try_from(fcb.cdate)?;
-        let ctime = NaiveTime::try_from(fcb.ctime)?;
+        let mdate = NaiveDate::try_from(fcb.mdate)?;
+        let mtime = NaiveTime::try_from(fcb.mtime)?;
         Ok(DirEntry {
             node_id: loc.into(),
             loc,
@@ -458,7 +458,7 @@ impl<'a, D: BlockDevice> DirEntryIter<'a, D> {
             kind: fcb.kind()?,
             size: self.fs.size_of(&fcb)?,
             start_cluster: fcb.start_cluster,
-            cdatetime: NaiveDateTime::new(cdate, ctime),
+            mdatetime: NaiveDateTime::new(mdate, mtime),
         })
     }
 }
@@ -556,8 +556,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
             kind: NodeKind::Directory,
             size: self.dir_size(self.root_dir_cluster())?,
             start_cluster: self.root_dir_cluster(),
-            ctime: U16Time::EMPTY,
-            cdate: U16Date::EMPTY,
+            mtime: U16Time::EMPTY,
+            mdate: U16Date::EMPTY,
         })
     }
 
@@ -791,6 +791,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
             fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
         }
+        fcb.touch()?;
         self.write_fcb_at(open.loc, &fcb)?;
         debug!(
             "write(handle={}, loc={}, cursor={}, bytes={})",
@@ -815,6 +816,19 @@ impl<D: BlockDevice> MyFileSystem<D> {
         let fcb = self.read_fcb_at(loc)?;
         let _ = self.write_fcb_data_at(loc, fcb, offset, data)?;
         Ok(data.len())
+    }
+
+    pub fn set_mtime(&mut self, loc: DirEntryLoc, mtime: DateTime<Utc>) -> Result<(), FsError> {
+        let mut fcb = self.read_fcb_at(loc)?;
+        fcb.set_mdatetime(mtime)?;
+        self.write_fcb_at(loc, &fcb)?;
+        for open in self.open_files.iter_mut().flatten() {
+            if open.loc == loc {
+                open.fcb = fcb;
+            }
+        }
+        debug!("set_mtime(loc={}, mtime={})", loc, mtime);
+        Ok(())
     }
 
     pub fn sync(&mut self) -> Result<(), FsError> {
@@ -960,8 +974,8 @@ impl<D: BlockDevice> MyFileSystem<D> {
             kind,
             size: self.size_of(&fcb)?,
             start_cluster: fcb.start_cluster,
-            ctime: fcb.ctime,
-            cdate: fcb.cdate,
+            mtime: fcb.mtime,
+            mdate: fcb.mdate,
         })
     }
 
@@ -991,6 +1005,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
             fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
         }
+        fcb.touch()?;
         self.write_fcb_at(loc, &fcb)?;
         for open in self.open_files.iter_mut().flatten() {
             if open.loc == loc {
@@ -1460,6 +1475,7 @@ impl<D: BlockDevice> MyFileSystem<D> {
         if let Some(loc) = self.find_dir_loc(self.root_dir_cluster(), dir_start)? {
             let mut fcb = self.read_fcb_at(loc)?;
             fcb.size = size;
+            fcb.touch()?;
             self.write_fcb_at(loc, &fcb)?;
         }
         Ok(())
