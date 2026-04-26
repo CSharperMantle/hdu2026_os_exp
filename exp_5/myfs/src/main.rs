@@ -546,7 +546,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
         let parent_cluster = unwrap_or_reply_fs_error!(reply, Self::dir_cluster(&fs, parent));
         let loc = unwrap_or_reply_fs_error!(reply, fs.lookup(parent_cluster, name)).0;
-        ok_or_reply_fs_error!(reply, fs.remove_file(loc));
+        ok_or_reply_fs_error!(reply, fs.rm(loc));
         reply.ok();
     }
 
@@ -590,7 +590,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let fs = unwrap_or_reply!(reply, self.lock_fs());
         let loc = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
-        let data = unwrap_or_reply_fs_error!(reply, fs.read_file_at(loc, offset, size as usize));
+        let data = unwrap_or_reply_fs_error!(reply, fs.read_at(loc, offset, size as usize));
         reply.data(&data);
     }
 
@@ -616,7 +616,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
         let loc = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
-        let written = unwrap_or_reply_fs_error!(reply, fs.write_file_at(loc, offset, data)) as u32;
+        let written = unwrap_or_reply_fs_error!(reply, fs.write_at(loc, offset, data)) as u32;
         reply.written(written);
     }
 
@@ -648,7 +648,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         debug!("release(fh={})", fh.0);
         let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
-        ok_or_reply_fs_error!(reply, fs.close(handle));
+        ok_or_reply_fs_error!(reply, fs.close_handle(handle));
         reply.ok();
     }
 

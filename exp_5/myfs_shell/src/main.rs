@@ -113,7 +113,7 @@ impl Shell {
                 let loc = target
                     .loc()
                     .ok_or_else(|| anyhow!("cannot remove root directory"))?;
-                self.fs.remove_file(loc)?;
+                self.fs.rm(loc)?;
             }
             "open" => {
                 let target = self
@@ -126,7 +126,7 @@ impl Shell {
             }
             "close" => {
                 let handle = self.parse_handle(parts.get(1), "usage: close <handle>")?;
-                self.fs.close(handle)?;
+                self.fs.close_handle(handle)?;
             }
             "read" => {
                 let handle = self.parse_handle(parts.get(1), "usage: read <handle> [len]")?;
@@ -135,14 +135,14 @@ impl Shell {
                     .map(|value| value.parse::<usize>())
                     .transpose()?
                     .unwrap_or(1024);
-                let bytes = self.fs.read(handle, len)?;
+                let bytes = self.fs.read_handle(handle, len)?;
                 println!("{}", String::from_utf8_lossy(&bytes));
                 println!("[{} bytes]", bytes.len());
             }
             "write" => {
                 let handle = self.parse_handle(parts.get(1), "usage: write <handle>")?;
                 let data = self.read_interactive_payload(stdin)?;
-                let written = self.fs.write(handle, data.as_bytes())?;
+                let written = self.fs.write_handle(handle, data.as_bytes())?;
                 println!("wrote {written} bytes");
             }
             "seek" => {
@@ -151,7 +151,16 @@ impl Shell {
                     .get(2)
                     .ok_or_else(|| anyhow!("usage: seek <handle> <offset>"))?
                     .parse::<usize>()?;
-                self.fs.seek(handle, offset)?;
+                self.fs.seek_handle(handle, offset)?;
+            }
+            "truncate" => {
+                let handle =
+                    self.parse_handle(parts.get(1), "usage: truncate <handle> <new_size>")?;
+                let new_size = parts
+                    .get(2)
+                    .ok_or_else(|| anyhow!("usage: truncate <handle> <new_size>"))?
+                    .parse::<usize>()?;
+                self.fs.truncate_handle(handle, new_size)?;
             }
             "sync" => {
                 self.fs.sync()?;
@@ -383,10 +392,11 @@ rmdir <path>
 create <path>
 rm <path>
 open <path>
-close <handle|path>
+close <handle>
 read <handle> [len]
 write <handle>
 seek <handle> <offset>
+truncate <handle> <new_size>
 sync
 fat
 stat <path>

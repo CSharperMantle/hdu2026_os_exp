@@ -765,7 +765,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(loc)
     }
 
-    pub fn remove_file(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
+    pub fn rm(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -821,7 +821,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(handle)
     }
 
-    pub fn close(&mut self, handle: FileHandle) -> Result<(), FsError> {
+    pub fn close_handle(&mut self, handle: FileHandle) -> Result<(), FsError> {
         debug!("close(handle={handle})");
         self.open_files[self.get_open_file_index(handle)?] = None;
         Ok(())
@@ -847,7 +847,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             .filter_map(|(slot, entry)| entry.as_ref().map(|open| (FileHandle::from(slot), open)))
     }
 
-    pub fn seek(&mut self, handle: FileHandle, pos: usize) -> Result<(), FsError> {
+    pub fn seek_handle(&mut self, handle: FileHandle, pos: usize) -> Result<(), FsError> {
         debug!("seek(handle={handle}, pos={pos})");
         let file = self.get_open_file_mut(handle)?;
         let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
@@ -858,7 +858,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(())
     }
 
-    pub fn read(&mut self, handle: FileHandle, len: usize) -> Result<Vec<u8>, FsError> {
+    pub fn read_handle(&mut self, handle: FileHandle, len: usize) -> Result<Vec<u8>, FsError> {
         let file = self.get_open_file(handle)?;
         let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
         let read_len = len.min(file_size.saturating_sub(file.cursor));
@@ -871,12 +871,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(data)
     }
 
-    pub fn read_file_at(
-        &self,
-        loc: DirEntryLoc,
-        offset: usize,
-        len: usize,
-    ) -> Result<Vec<u8>, FsError> {
+    pub fn read_at(&self, loc: DirEntryLoc, offset: usize, len: usize) -> Result<Vec<u8>, FsError> {
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -889,7 +884,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         self.read_chain_bytes(fcb.start_cluster, offset, read_len)
     }
 
-    pub fn write(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
+    pub fn write_handle(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
         // HACK: Don't make it interfere with mutable borrows.
         let file = self.get_open_file(handle)?.to_owned();
         debug!(
@@ -922,7 +917,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(data.len())
     }
 
-    pub fn write_file_at(
+    pub fn write_at(
         &mut self,
         loc: DirEntryLoc,
         offset: usize,
@@ -995,6 +990,11 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 open.cursor = open.cursor.min(new_size);
             });
         Ok(())
+    }
+
+    pub fn truncate_handle(&mut self, handle: FileHandle, new_size: usize) -> Result<(), FsError> {
+        let file = self.get_open_file(handle)?;
+        self.truncate(file.loc, new_size)
     }
 
     /// Set modification time of an entry.
@@ -1903,7 +1903,7 @@ mod tests {
         )
         .unwrap();
         let loc = fs.create_file(fs.root_dir_cluster(), "NOTE.TXT").unwrap();
-        fs.write_file_at(loc, 0, b"abc123").unwrap();
+        fs.write_at(loc, 0, b"abc123").unwrap();
         fs.sync().unwrap();
         drop(fs);
 
@@ -1926,7 +1926,7 @@ mod tests {
         let (loc, _) = reopened
             .lookup(reopened.root_dir_cluster(), "NOTE.TXT")
             .unwrap();
-        let data = reopened.read_file_at(loc, 0, 64).unwrap();
+        let data = reopened.read_at(loc, 0, 64).unwrap();
         assert_eq!(data, b"abc123");
     }
 
@@ -2066,7 +2066,7 @@ mod tests {
         assert_eq!(entries[0].node_id, readme_node);
 
         let handle = fs.open_node(readme_node).unwrap();
-        fs.close(handle).unwrap();
+        fs.close_handle(handle).unwrap();
     }
 
     #[test]
@@ -2112,9 +2112,9 @@ mod tests {
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = vec![0xCD; fs.cluster_size() + 37];
-        assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
-        fs.seek(handle, 0).unwrap();
-        assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);
+        assert_eq!(fs.write_handle(handle, &payload).unwrap(), payload.len());
+        fs.seek_handle(handle, 0).unwrap();
+        assert_eq!(fs.read_handle(handle, payload.len()).unwrap(), payload);
     }
 
     #[test]
@@ -2129,9 +2129,9 @@ mod tests {
         let file_loc = fs.create_file(fs.root_dir_cluster(), "BIG.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = vec![0x5A; fs.cluster_size() * 2 + 11];
-        assert_eq!(fs.write(handle, &payload).unwrap(), payload.len());
-        fs.seek(handle, 0).unwrap();
-        assert_eq!(fs.read(handle, payload.len()).unwrap(), payload);
+        assert_eq!(fs.write_handle(handle, &payload).unwrap(), payload.len());
+        fs.seek_handle(handle, 0).unwrap();
+        assert_eq!(fs.read_handle(handle, payload.len()).unwrap(), payload);
     }
 
     #[test]
@@ -2140,9 +2140,9 @@ mod tests {
         let file_loc = fs.create_file(fs.root_dir_cluster(), "SYNC.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = vec![0xEF; DEFAULT_BLOCK_SIZE + 99];
-        fs.write(handle, &payload).unwrap();
-        fs.close(handle).unwrap();
-        fs.remove_file(file_loc).unwrap();
+        fs.write_handle(handle, &payload).unwrap();
+        fs.close_handle(handle).unwrap();
+        fs.rm(file_loc).unwrap();
         fs.sync().unwrap();
 
         assert_eq!(read_fat_copy_bytes(&fs, 0), read_fat_copy_bytes(&fs, 1));
@@ -2156,8 +2156,8 @@ mod tests {
 
         let file_loc = fs.create_file(fs.root_dir_cluster(), "CACHE.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
-        fs.write(handle, &[0xAA; 32]).unwrap();
-        fs.close(handle).unwrap();
+        fs.write_handle(handle, &[0xAA; 32]).unwrap();
+        fs.close_handle(handle).unwrap();
 
         assert!(fs.fat_dirty);
         assert_ne!(
@@ -2198,7 +2198,7 @@ mod tests {
             Err(FsError::DirectoryNotEmpty(_))
         ));
 
-        fs.remove_file(readme_loc).unwrap();
+        fs.rm(readme_loc).unwrap();
         fs.rmdir(docs_loc).unwrap();
         assert!(collect_dir_entries(&fs, fs.root_dir_cluster()).is_empty());
     }
@@ -2209,12 +2209,12 @@ mod tests {
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
         let payload = [0xAB; DEFAULT_BLOCK_SIZE + 200];
-        let written = fs.write(handle, &payload).unwrap();
+        let written = fs.write_handle(handle, &payload).unwrap();
         assert_eq!(written, payload.len());
-        fs.seek(handle, 0).unwrap();
-        let read_back = fs.read(handle, payload.len()).unwrap();
+        fs.seek_handle(handle, 0).unwrap();
+        let read_back = fs.read_handle(handle, payload.len()).unwrap();
         assert_eq!(read_back, payload);
-        fs.close(handle).unwrap();
+        fs.close_handle(handle).unwrap();
 
         let stat = fs.stat(file_loc).unwrap();
         assert_eq!(stat.size, payload.len() as u32);
@@ -2254,15 +2254,12 @@ mod tests {
         assert_eq!(handle, FileHandle(0));
         assert_eq!(fs.loc_of_handle(handle).unwrap(), file_loc);
         assert!(matches!(fs.open(file_loc), Err(FsError::AlreadyOpen(_))));
-        assert!(matches!(
-            fs.remove_file(file_loc),
-            Err(FsError::FileOpen(_))
-        ));
-        fs.close(handle).unwrap();
+        assert!(matches!(fs.rm(file_loc), Err(FsError::FileOpen(_))));
+        fs.close_handle(handle).unwrap();
         let reopened = fs.open(file_loc).unwrap();
         assert_eq!(reopened, FileHandle(0));
-        fs.close(reopened).unwrap();
-        fs.remove_file(file_loc).unwrap();
+        fs.close_handle(reopened).unwrap();
+        fs.rm(file_loc).unwrap();
 
         for idx in 0..MAX_OPEN_FILES {
             let loc = fs
@@ -2284,9 +2281,9 @@ mod tests {
         .unwrap();
 
         let loc = fs.create_file(fs.root_dir_cluster(), "CUT.BIN").unwrap();
-        fs.write_file_at(loc, 0, &[b'A'; 96]).unwrap();
+        fs.write_at(loc, 0, &[b'A'; 96]).unwrap();
         let handle = fs.open(loc).unwrap();
-        fs.seek(handle, 90).unwrap();
+        fs.seek_handle(handle, 90).unwrap();
 
         fs.truncate(loc, 20).unwrap();
 
@@ -2300,7 +2297,7 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(fs.read_file_at(loc, 0, 32).unwrap(), vec![b'A'; 20]);
+        assert_eq!(fs.read_at(loc, 0, 32).unwrap(), vec![b'A'; 20]);
     }
 
     #[test]
@@ -2313,14 +2310,14 @@ mod tests {
         .unwrap();
 
         let loc = fs.create_file(fs.root_dir_cluster(), "ZERO.BIN").unwrap();
-        fs.write_file_at(loc, 0, &[b'Z'; 96]).unwrap();
+        fs.write_at(loc, 0, &[b'Z'; 96]).unwrap();
 
         fs.truncate(loc, 0).unwrap();
 
         let fcb = fs.read_fcb_at(loc).unwrap();
         assert_eq!(fcb.size, 0);
         assert_eq!(fcb.start_cluster, ClusterId::FREE);
-        assert!(fs.read_file_at(loc, 0, 16).unwrap().is_empty());
+        assert!(fs.read_at(loc, 0, 16).unwrap().is_empty());
     }
 
     #[test]
@@ -2333,11 +2330,11 @@ mod tests {
         .unwrap();
 
         let loc = fs.create_file(fs.root_dir_cluster(), "GROW.BIN").unwrap();
-        fs.write_file_at(loc, 0, b"abc").unwrap();
+        fs.write_at(loc, 0, b"abc").unwrap();
 
         fs.truncate(loc, 80).unwrap();
 
-        let data = fs.read_file_at(loc, 0, 80).unwrap();
+        let data = fs.read_at(loc, 0, 80).unwrap();
         assert_eq!(&data[..3], b"abc");
         assert!(data[3..].iter().all(|byte| *byte == 0));
         assert_eq!(
@@ -2359,10 +2356,10 @@ mod tests {
         .unwrap();
 
         let loc = fs.create_file(fs.root_dir_cluster(), "PATCH.BIN").unwrap();
-        fs.write_file_at(loc, 0, &[b'A'; 80]).unwrap();
-        fs.write_file_at(loc, 60, b"WXYZ").unwrap();
+        fs.write_at(loc, 0, &[b'A'; 80]).unwrap();
+        fs.write_at(loc, 60, b"WXYZ").unwrap();
 
-        let data = fs.read_file_at(loc, 56, 12).unwrap();
+        let data = fs.read_at(loc, 56, 12).unwrap();
         assert_eq!(&data, b"AAAAWXYZAAAA");
     }
 
@@ -2376,10 +2373,10 @@ mod tests {
         .unwrap();
 
         let loc = fs.create_file(fs.root_dir_cluster(), "EOF.BIN").unwrap();
-        fs.write_file_at(loc, 0, b"abcdef").unwrap();
+        fs.write_at(loc, 0, b"abcdef").unwrap();
 
-        assert_eq!(fs.read_file_at(loc, 4, 16).unwrap(), b"ef");
-        assert!(fs.read_file_at(loc, 6, 16).unwrap().is_empty());
+        assert_eq!(fs.read_at(loc, 4, 16).unwrap(), b"ef");
+        assert!(fs.read_at(loc, 6, 16).unwrap().is_empty());
     }
 
     #[test]
