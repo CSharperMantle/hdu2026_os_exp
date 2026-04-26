@@ -161,15 +161,12 @@ impl TryFrom<&str> for ShortName {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let upper = value.to_ascii_uppercase();
-        let mut parts = upper.split('.');
-        let base = parts
-            .next()
-            .filter(|part| !part.is_empty())
-            .ok_or_else(|| FsError::InvalidName(value.to_string()))?;
-        let ext = parts.next().unwrap_or("");
-        if parts.next().is_some() {
-            return Err(FsError::InvalidName(value.to_string()));
-        }
+        let parts = upper.split('.').collect::<Vec<_>>();
+        let (base, ext) = match parts.as_slice() {
+            [base] => (*base, ""),
+            [base, ext] => (*base, *ext),
+            _ => return Err(FsError::InvalidName(value.to_string())),
+        };
         if !base
             .chars()
             .chain(ext.chars())
@@ -177,10 +174,17 @@ impl TryFrom<&str> for ShortName {
         {
             return Err(FsError::InvalidName(value.to_string()));
         }
-        Ok(ShortName {
-            base: SpacedCharBuf::try_from(base)?,
-            ext: SpacedCharBuf::try_from(ext)?,
-        })
+        let base = SpacedCharBuf::try_from(base)?;
+        let ext = SpacedCharBuf::try_from(ext)?;
+        match (parts.len(), base.is_empty(), ext.is_empty()) {
+            (1, true, _) => Err(FsError::InvalidName(value.to_string())), // Empty name
+            (1, false, _) => Ok(ShortName { base, ext }),                 // Dotfiles
+            (2, true, true) => Err(FsError::InvalidName(value.to_string())), // Space-dot-space
+            (2, true, false) => Ok(ShortName { base, ext }),              // Space-dot-EXT
+            (2, false, true) => Err(FsError::InvalidName(value.to_string())), // BASE.
+            (2, false, false) => Ok(ShortName { base, ext }),             // BASE.EXT
+            _ => Err(FsError::InvalidName(value.to_string())),
+        }
     }
 }
 
@@ -237,9 +241,15 @@ mod tests {
     #[test]
     fn normalize_component_enforces_83_names() {
         assert_eq!(normalize_component("readme.txt").unwrap(), "README.TXT");
+        assert_eq!(normalize_component(".git").unwrap(), ".GIT");
+        assert_eq!(normalize_component(".b").unwrap(), ".B");
         assert!(normalize_component("too_long_name.txt").is_err());
         assert!(normalize_component("bad-name.txt").is_err());
         assert!(normalize_component(".").is_err());
+        assert!(normalize_component("..").is_err());
+        assert!(normalize_component("a.").is_err());
+        assert!(normalize_component("a. ").is_err());
+        assert!(normalize_component(". ").is_err());
     }
 
     #[test]
