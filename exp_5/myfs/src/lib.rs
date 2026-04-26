@@ -1532,7 +1532,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn delete_dir_slot(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
-        trace!("mark_slot_deleted(loc={loc})");
+        trace!("delete_dir_slot(loc={loc})");
         let mut bytes = [0; Fcb::SIZE];
         bytes[0] = DirSlot::SLOT_DELETED;
         self.write_chain_bytes(loc.dir_start, self.slot_offset_in_chain(loc), &bytes)
