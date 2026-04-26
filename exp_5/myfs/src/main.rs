@@ -447,7 +447,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
             "setattr(ino={}), mode={:?}, uid={:?}, gid={:?}, size={:?}, atime={:?}, mtime={:?}, ctime={:?}, fh={:?}, crtime={:?}, chgtime={:?}, bkuptime={:?}, flags={:?}",
             ino.0, mode, uid, gid, size, atime, mtime, ctime, crtime, fh, chgtime, bkuptime, flags
         );
-        if any_some!(mode, uid, gid, fh, crtime, chgtime, bkuptime, flags) {
+        if any_some!(mode, uid, gid, crtime, chgtime, bkuptime, flags) {
             reply.error(fuser::Errno::EOPNOTSUPP);
             return;
         }
@@ -459,6 +459,20 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         }
         let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(FuseNodeId::from(node))).0;
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        // Sanity check FileHandle
+        if let Some(fh) = fh {
+            let fh = unwrap_or_reply!(reply, FuseFileHandle::try_from(fh));
+            let fh = myfs::FileHandle::from(fh);
+            let actual_loc = unwrap_or_reply_fs_error!(
+                reply,
+                fs.find_open_handle(loc).ok_or(FsError::InvalidHandle(fh))
+            );
+            if fh != actual_loc {
+                reply.error(fuser::Errno::EBADF);
+                return;
+            }
+        }
+
         if let Some(size) = size {
             let size = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(size));
             ok_or_reply_fs_error!(reply, fs.truncate(loc, size));
