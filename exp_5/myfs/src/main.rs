@@ -447,15 +447,11 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
             "setattr(ino={}), mode={:?}, uid={:?}, gid={:?}, size={:?}, atime={:?}, mtime={:?}, ctime={:?}, fh={:?}, crtime={:?}, chgtime={:?}, bkuptime={:?}, flags={:?}",
             ino.0, mode, uid, gid, size, atime, mtime, ctime, crtime, fh, chgtime, bkuptime, flags
         );
-        if any_some!(mode, uid, gid, size, fh, crtime, chgtime, bkuptime, flags) {
+        if any_some!(mode, uid, gid, fh, crtime, chgtime, bkuptime, flags) {
             reply.error(fuser::Errno::EOPNOTSUPP);
             return;
         }
 
-        let mtime = mtime
-            .or(ctime.map(TimeOrNow::SpecificTime))
-            .or(atime)
-            .expect("one of mtime, ctime, or atime must be set");
         let node = FuseNodeId::from(ino).0;
         if node == NodeId::ROOT {
             reply.error(fuser::Errno::EOPNOTSUPP);
@@ -463,10 +459,16 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         }
         let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(FuseNodeId::from(node))).0;
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
-        ok_or_reply_fs_error!(
-            reply,
-            fs.set_mtime(loc, DateTime::<Utc>::from(FuseDateTimeUtc::from(mtime)))
-        );
+        if let Some(size) = size {
+            let size = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(size));
+            ok_or_reply_fs_error!(reply, fs.truncate(loc, size));
+        }
+        if let Some(mtime) = mtime.or(ctime.map(TimeOrNow::SpecificTime)).or(atime) {
+            ok_or_reply_fs_error!(
+                reply,
+                fs.set_mtime(loc, DateTime::<Utc>::from(FuseDateTimeUtc::from(mtime)))
+            );
+        }
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
@@ -783,7 +785,11 @@ struct Args {
         help = "Path to the formatted image"
     )]
     image: Option<PathBuf>,
-    #[arg(long, requires = "memory", help = "Set the block size in bytes of the image")]
+    #[arg(
+        long,
+        requires = "memory",
+        help = "Set the block size in bytes of the image"
+    )]
     block_size: Option<u16>,
     #[arg(long, requires = "memory", help = "Set number of blocks in the image")]
     block_count: Option<u16>,

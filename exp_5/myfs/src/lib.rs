@@ -933,6 +933,70 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(data.len())
     }
 
+    pub fn truncate(&mut self, loc: DirEntryLoc, new_size: usize) -> Result<(), FsError> {
+        let mut fcb = self.read_fcb_at(loc)?;
+        if fcb.kind()? == NodeKind::Directory {
+            return Err(FsError::IsADirectory(fcb.short_name()));
+        }
+
+        let old_size = usize::try_from(fcb.size).expect("file size must fit into usize");
+        if new_size == old_size {
+            return Ok(());
+        }
+
+        if new_size > old_size {
+            let zero_fill = vec![0; new_size - old_size];
+            self.write_fcb_data_at(loc, fcb, old_size, &zero_fill)?;
+            return Ok(());
+        }
+
+        let needed_clusters = if new_size == 0 {
+            0
+        } else {
+            new_size.div_ceil(self.cluster_size())
+        };
+
+        if needed_clusters == 0 {
+            if fcb.start_cluster != ClusterId::FREE {
+                self.free_chain_from(fcb.start_cluster)?;
+                fcb.start_cluster = ClusterId::FREE;
+            }
+        } else {
+            let mut iter = ChainIter::new(self, fcb.start_cluster)?;
+            let last_keep = iter
+                .by_ref()
+                .take(needed_clusters)
+                .try_fold(None, |_, cluster| cluster.map(Some))?
+                .ok_or_else(|| {
+                    FsError::CorruptFs("cluster chain shorter than file size".to_string())
+                })?;
+            let tail = iter.next().transpose()?;
+            self.write_fat(last_keep, FatEntry::EndOfChain)?;
+            if let Some(tail) = tail {
+                self.free_chain_from(tail)?;
+            }
+            if !new_size.is_multiple_of(self.cluster_size()) {
+                let zero_start = new_size;
+                let zero_len = self.cluster_size() - (new_size % self.cluster_size());
+                let zeros = vec![0; zero_len];
+                self.write_chain_bytes(fcb.start_cluster, zero_start, &zeros)?;
+            }
+        }
+
+        fcb.size = u32::try_from(new_size).expect("file size exceeds u32 range");
+        fcb.touch()?;
+        self.write_fcb_at(loc, &fcb)?;
+        self.open_files
+            .iter_mut()
+            .flatten()
+            .filter(|open| open.loc == loc)
+            .for_each(|open| {
+                open.fcb = fcb;
+                open.cursor = open.cursor.min(new_size);
+            });
+        Ok(())
+    }
+
     /// Set modification time of an entry.
     pub fn set_mtime(&mut self, loc: DirEntryLoc, mtime: DateTime<Utc>) -> Result<(), FsError> {
         let mut fcb = self.read_fcb_at(loc)?;
@@ -2208,6 +2272,81 @@ mod tests {
         }
         let last_loc = fs.create_file(fs.root_dir_cluster(), "LAST.TXT").unwrap();
         assert!(matches!(fs.open(last_loc), Err(FsError::TooManyOpenFiles)));
+    }
+
+    #[test]
+    fn truncate_shrinks_and_clamps_cursor() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "CUT.BIN").unwrap();
+        fs.write_file_at(loc, 0, &[b'A'; 96]).unwrap();
+        let handle = fs.open(loc).unwrap();
+        fs.seek(handle, 90).unwrap();
+
+        fs.truncate(loc, 20).unwrap();
+
+        let fcb = fs.read_fcb_at(loc).unwrap();
+        assert_eq!(fcb.size, 20);
+        assert_eq!(fs.get_open_file(handle).unwrap().cursor, 20);
+        assert_eq!(
+            ChainIter::new(&fs, fcb.start_cluster)
+                .unwrap()
+                .try_fold(0, |acc, cluster| cluster.map(|_| acc + 1))
+                .unwrap(),
+            1
+        );
+        assert_eq!(fs.read_file_at(loc, 0, 32).unwrap(), vec![b'A'; 20]);
+    }
+
+    #[test]
+    fn truncate_to_zero_frees_chain() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "ZERO.BIN").unwrap();
+        fs.write_file_at(loc, 0, &[b'Z'; 96]).unwrap();
+
+        fs.truncate(loc, 0).unwrap();
+
+        let fcb = fs.read_fcb_at(loc).unwrap();
+        assert_eq!(fcb.size, 0);
+        assert_eq!(fcb.start_cluster, ClusterId::FREE);
+        assert!(fs.read_file_at(loc, 0, 16).unwrap().is_empty());
+    }
+
+    #[test]
+    fn truncate_grows_with_zero_fill() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "GROW.BIN").unwrap();
+        fs.write_file_at(loc, 0, b"abc").unwrap();
+
+        fs.truncate(loc, 80).unwrap();
+
+        let data = fs.read_file_at(loc, 0, 80).unwrap();
+        assert_eq!(&data[..3], b"abc");
+        assert!(data[3..].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            ChainIter::new(&fs, fs.read_fcb_at(loc).unwrap().start_cluster)
+                .unwrap()
+                .try_fold(0, |acc, cluster| cluster.map(|_| acc + 1))
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
