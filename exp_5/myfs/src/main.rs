@@ -778,7 +778,7 @@ struct Args {
         help = "Path to the formatted image"
     )]
     image: Option<PathBuf>,
-    #[arg(long, requires = "memory", help = "Set the lock size of the image")]
+    #[arg(long, requires = "memory", help = "Set the block size in bytes of the image")]
     block_size: Option<u16>,
     #[arg(long, requires = "memory", help = "Set number of blocks in the image")]
     block_count: Option<u16>,

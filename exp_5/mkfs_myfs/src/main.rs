@@ -13,7 +13,7 @@ use std::path::PathBuf;
 struct Args {
     #[arg(value_name = "IMAGE", help = "Path to the new image")]
     image: PathBuf,
-    #[arg(short = 's', long, help = "Set the block size of the image")]
+    #[arg(short = 's', long, help = "Set the block size in bytes of the image")]
     block_size: Option<u16>,
     #[arg(short = 'n', long, help = "Set number of blocks in the image")]
     block_count: Option<u16>,
@@ -63,15 +63,16 @@ fn main() -> Result<()> {
     let block_size = config.block_size;
     let block_count = config.block_count;
     let blocks_per_cluster = config.blocks_per_cluster;
-    let _ = MyFileSystem::format_on_device(device, config)
+    let fs = MyFileSystem::format_on_device(device, config)
         .with_context(|| format!("failed to format image {}", image_path.display()))?;
 
     println!(
-        "Formatted myfs image at {}\n\tblock_size={}\n\tblock_count={}\n\tblocks_per_cluster={}",
+        "Formatted myfs image at {}\n\tBlock size: {}B\n\tBlock count: {}\n\tBlocks per cluster: {}\n\tFAT blocks per copy: {}",
         image_path.display(),
         block_size,
         block_count,
-        blocks_per_cluster
+        blocks_per_cluster,
+        fs.boot_sector().fat_block_count,
     );
     Ok(())
 }
