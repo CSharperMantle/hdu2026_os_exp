@@ -901,7 +901,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         };
 
         let mut fcb = self.read_fcb_at(file.loc)?;
-        fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
+        fcb = self.ensure_fcb_chain_capacity(fcb, needed_clusters)?;
         if !data.is_empty() {
             self.write_chain_bytes(fcb.start_cluster, file.cursor, data)?;
         }
@@ -950,7 +950,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 old_size.div_ceil(self.cluster_size())
             };
             let needed_clusters = new_size.div_ceil(self.cluster_size());
-            fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
+            fcb = self.ensure_fcb_chain_capacity(fcb, needed_clusters)?;
             // Roll back on failure.
             let result = (|| -> Result<(), FsError> {
                 self.zero_fill_chain_range(fcb.start_cluster, old_size, new_size - old_size)?;
@@ -962,11 +962,11 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 self.trim_chain_len(fcb.start_cluster, old_cluster_count)?;
                 return Err(err);
             }
-            self.open_files
-                .iter_mut()
-                .flatten()
-                .filter(|open| open.loc == loc)
-                .for_each(|open| open.fcb = fcb);
+            for open in self.open_files.iter_mut().flatten() {
+                if open.loc == loc {
+                    open.fcb = fcb;
+                }
+            }
             return Ok(());
         }
 
@@ -994,14 +994,11 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         fcb.size = new_size_u32;
         fcb.touch()?;
         self.write_fcb_at(loc, &fcb)?;
-        self.open_files
-            .iter_mut()
-            .flatten()
-            .filter(|open| open.loc == loc)
-            .for_each(|open| {
+        for open in self.open_files.iter_mut().flatten() {
+            if open.loc == loc {
                 open.fcb = fcb;
-                open.cursor = open.cursor.min(new_size);
-            });
+            }
+        }
         Ok(())
     }
 
@@ -1073,7 +1070,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(count * Fcb::SIZE as u32)
     }
 
-    fn ensure_fcb_capacity(
+    fn ensure_fcb_chain_capacity(
         &mut self,
         mut fcb: Fcb,
         needed_clusters: usize,
@@ -1085,7 +1082,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         }
         let extra = self.allocate_clusters(needed_clusters - current)?;
         debug!(
-            "ensure_fcb_capacity(start_cluster={}, current_clusters={current}, needed_clusters={needed_clusters}): added_clusters={}",
+            "ensure_fcb_chain_capacity(start_cluster={}, current_clusters={current}, needed_clusters={needed_clusters}): added_clusters={}",
             fcb.start_cluster,
             extra.len()
         );
@@ -1205,7 +1202,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             new_end.div_ceil(self.cluster_size())
         };
 
-        fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
+        fcb = self.ensure_fcb_chain_capacity(fcb, needed_clusters)?;
         if !data.is_empty() {
             self.write_chain_bytes(fcb.start_cluster, offset, data)?;
         }
