@@ -5,11 +5,9 @@ use std::io::Write;
 
 use myfs::*;
 
-fn main() -> Result<()> {
-    env_logger::init();
-    let mut shell = Shell::new().expect("filesystem should initialize");
-    shell.run()?;
-    Ok(())
+enum ControlFlow {
+    Continue,
+    Exit,
 }
 
 struct Shell {
@@ -330,21 +328,15 @@ impl Shell {
             return;
         }
 
-        for OpenFile {
-            handle,
-            loc,
-            cursor,
-            fcb,
-        } in entries
-        {
+        for (handle, file) in entries {
             println!(
                 "#{:<3} loc={} cursor={:<6} size={:<8} cluster={:<4} name={}",
                 handle,
-                loc,
-                cursor,
-                fcb.size,
-                fcb.start_cluster,
-                fcb.short_name()
+                file.loc,
+                file.cursor,
+                file.fcb.size,
+                file.fcb.start_cluster,
+                file.fcb.short_name()
             );
         }
     }
@@ -382,11 +374,6 @@ impl ResolvedTarget {
     }
 }
 
-enum ControlFlow {
-    Continue,
-    Exit,
-}
-
 const HELP: &str = "\
 pwd
 cd <path>
@@ -407,3 +394,10 @@ openfiles
 help
 exit
 ";
+
+fn main() -> Result<()> {
+    env_logger::init();
+    let mut shell = Shell::new().expect("filesystem should initialize");
+    shell.run()?;
+    Ok(())
+}

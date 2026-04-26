@@ -15,6 +15,11 @@ use chrono::NaiveDate;
 use chrono::NaiveDateTime;
 use chrono::NaiveTime;
 use chrono::Utc;
+use derive_more::Deref;
+use derive_more::DerefMut;
+use derive_more::Display;
+use derive_more::From;
+use derive_more::Into;
 use log::debug;
 use log::trace;
 use std::cell::RefCell;
@@ -32,6 +37,26 @@ macro_rules! unwrap_or_ret_some_err {
 }
 
 pub const MAX_OPEN_FILES: usize = 10;
+
+/// The opaque handle to a opened file.
+#[repr(transparent)]
+#[derive(Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[display("{_0}")]
+pub struct FileHandle(u32);
+
+impl TryFrom<FileHandle> for usize {
+    type Error = FsError;
+
+    fn try_from(value: FileHandle) -> Result<Self, Self::Error> {
+        Self::try_from(value.0).map_err(|_| FsError::InvalidHandle(value))
+    }
+}
+
+impl From<usize> for FileHandle {
+    fn from(value: usize) -> Self {
+        Self(u32::try_from(value).expect("value too large for encoding into a FileHandle"))
+    }
+}
 
 /// Error type for [`MyFileSystem`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -319,7 +344,6 @@ impl DirSlot {
 /// State of an opened file.
 #[derive(Debug, Clone)]
 pub struct OpenFile {
-    pub handle: FileHandle,
     pub loc: DirEntryLoc,
     pub cursor: usize,
     pub fcb: Fcb,
@@ -519,7 +543,6 @@ pub struct MyFileSystem<D: BufferedBlockDevice> {
     fat_dirty: bool,
     /// Opened file handles with holes.
     open_files: [Option<OpenFile>; MAX_OPEN_FILES],
-    next_handle: u32,
 }
 
 impl MyFileSystem<LogicalBlockDevice<MemoryBackend>> {
@@ -582,7 +605,6 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             fat_m: vec![FatEntry::Free; fat_entry_count(config.block_size, fat_block_count)],
             fat_dirty: false,
             open_files: std::array::from_fn(|_| None),
-            next_handle: 1,
         };
 
         // Write the boot sector.
@@ -623,7 +645,6 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             fat_m,
             fat_dirty: false,
             open_files: std::array::from_fn(|_| None),
-            next_handle: 1,
         })
     }
 
@@ -789,10 +810,8 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             .iter()
             .position(Option::is_none)
             .ok_or(FsError::TooManyOpenFiles)?;
-        let handle = FileHandle(self.next_handle);
-        self.next_handle = self.next_handle.wrapping_add(1);
+        let handle = FileHandle(u32::try_from(slot).unwrap());
         self.open_files[slot] = Some(OpenFile {
-            handle,
             loc,
             cursor: 0,
             fcb,
@@ -802,50 +821,52 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn close(&mut self, handle: FileHandle) -> Result<(), FsError> {
-        let slot = self.find_open_file_slot(handle)?;
-        self.open_files[slot] = None;
         debug!("close(handle={handle})");
+        self.open_files[self.get_open_file_index(handle)?] = None;
         Ok(())
     }
 
     pub fn find_open_handle(&self, loc: DirEntryLoc) -> Option<FileHandle> {
-        self.open_files.iter().flatten().find_map(|entry| {
-            if entry.loc == loc {
-                Some(entry.handle)
-            } else {
-                None
-            }
-        })
+        self.open_files
+            .iter()
+            .enumerate()
+            .find_map(|(slot, entry)| {
+                if entry.as_ref().is_some_and(|open| open.loc == loc) {
+                    Some(FileHandle::from(slot))
+                } else {
+                    None
+                }
+            })
     }
 
-    pub fn open_files(&self) -> impl Iterator<Item = &OpenFile> + '_ {
-        self.open_files.iter().flatten()
+    pub fn open_files(&self) -> impl Iterator<Item = (FileHandle, &OpenFile)> + '_ {
+        self.open_files
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| entry.as_ref().map(|open| (FileHandle::from(slot), open)))
     }
 
     pub fn seek(&mut self, handle: FileHandle, pos: usize) -> Result<(), FsError> {
-        let slot = self.find_open_file_slot(handle)?;
-        let file_size =
-            usize::try_from(self.open_files[slot].as_ref().expect("open slot").fcb.size)
-                .expect("file size must fit into usize");
+        debug!("seek(handle={handle}, pos={pos})");
+        let file = self.get_open_file_mut(handle)?;
+        let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
         if pos > file_size {
             return Err(FsError::SeekOutOfBounds(pos));
         }
-        self.open_files[slot].as_mut().expect("open slot").cursor = pos;
-        debug!("seek(handle={handle}, pos={pos})");
+        file.cursor = pos;
         Ok(())
     }
 
     pub fn read(&mut self, handle: FileHandle, len: usize) -> Result<Vec<u8>, FsError> {
-        let slot = self.find_open_file_slot(handle)?;
-        let open = self.open_files[slot].as_ref().expect("open slot").clone();
-        let file_size = usize::try_from(open.fcb.size).expect("file size must fit into usize");
-        let read_len = len.min(file_size.saturating_sub(open.cursor));
-        let data = if open.fcb.start_cluster == ClusterId::FREE || read_len == 0 {
+        let file = self.get_open_file(handle)?;
+        let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
+        let read_len = len.min(file_size.saturating_sub(file.cursor));
+        let data = if file.fcb.start_cluster == ClusterId::FREE || read_len == 0 {
             Vec::new()
         } else {
-            self.read_chain_bytes(open.fcb.start_cluster, open.cursor, read_len)?
+            self.read_chain_bytes(file.fcb.start_cluster, file.cursor, read_len)?
         };
-        self.open_files[slot].as_mut().expect("open slot").cursor += data.len();
+        self.get_open_file_mut(handle)?.cursor += data.len();
         Ok(data)
     }
 
@@ -868,33 +889,33 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn write(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
-        let slot = self.find_open_file_slot(handle)?;
-        let open = self.open_files[slot].as_ref().expect("open slot").clone();
-        let cursor = open.cursor;
-        let new_end = cursor + data.len();
+        // HACK: Don't make it interfere with mutable borrows.
+        let file = self.get_open_file(handle)?.to_owned();
+        debug!(
+            "write(handle={handle}, loc={}, cursor={}, bytes={})",
+            file.loc,
+            file.cursor,
+            data.len()
+        );
+        let new_end = file.cursor + data.len();
         let needed_clusters = if new_end == 0 {
             0
         } else {
             new_end.div_ceil(self.cluster_size())
         };
 
-        let mut fcb = self.read_fcb_at(open.loc)?;
+        let mut fcb = self.read_fcb_at(file.loc)?;
         fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
         if !data.is_empty() {
-            self.write_chain_bytes(fcb.start_cluster, cursor, data)?;
+            self.write_chain_bytes(fcb.start_cluster, file.cursor, data)?;
         }
         if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
             fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
         }
         fcb.touch()?;
-        self.write_fcb_at(open.loc, &fcb)?;
-        debug!(
-            "write(handle={handle}, loc={}, cursor={cursor}, bytes={})",
-            open.loc,
-            data.len()
-        );
+        self.write_fcb_at(file.loc, &fcb)?;
 
-        let open_entry = self.open_files[slot].as_mut().expect("open slot");
+        let open_entry = self.get_open_file_mut(handle)?;
         open_entry.cursor = new_end;
         open_entry.fcb = fcb;
         Ok(data.len())
@@ -923,6 +944,10 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         }
         debug!("set_mtime(loc={loc}, mtime={mtime})");
         Ok(())
+    }
+
+    pub fn loc_of_handle(&self, handle: FileHandle) -> Result<DirEntryLoc, FsError> {
+        Ok(self.get_open_file(handle)?.loc)
     }
 
     /// Flush the FAT to disk if needed.
@@ -1002,11 +1027,32 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(fcb)
     }
 
-    fn find_open_file_slot(&self, handle: FileHandle) -> Result<usize, FsError> {
-        self.open_files
-            .iter()
-            .position(|entry| entry.as_ref().is_some_and(|open| open.handle == handle))
-            .ok_or(FsError::InvalidHandle(handle))
+    fn get_open_file_index(&self, handle: FileHandle) -> Result<usize, FsError> {
+        let slot = usize::try_from(handle).map_err(|_| FsError::InvalidHandle(handle))?;
+        if slot < self.open_files.len() && self.open_files[slot].is_some() {
+            return Ok(slot);
+        }
+        Err(FsError::InvalidHandle(handle))
+    }
+
+    fn get_open_file(&self, handle: FileHandle) -> Result<&OpenFile, FsError> {
+        let slot = usize::try_from(handle).map_err(|_| FsError::InvalidHandle(handle))?;
+        if slot < self.open_files.len()
+            && let Some(file) = self.open_files[slot].as_ref()
+        {
+            return Ok(file);
+        }
+        Err(FsError::InvalidHandle(handle))
+    }
+
+    fn get_open_file_mut(&mut self, handle: FileHandle) -> Result<&mut OpenFile, FsError> {
+        let slot = usize::try_from(handle).map_err(|_| FsError::InvalidHandle(handle))?;
+        if slot < self.open_files.len()
+            && let Some(file) = self.open_files[slot].as_mut()
+        {
+            return Ok(file);
+        }
+        Err(FsError::InvalidHandle(handle))
     }
 
     fn dir_node_cluster_of(&self, node_id: NodeId) -> Result<ClusterId, FsError> {
@@ -2150,12 +2196,17 @@ mod tests {
         let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "ONE.TXT").unwrap();
         let handle = fs.open(file_loc).unwrap();
+        assert_eq!(handle, FileHandle(0));
+        assert_eq!(fs.loc_of_handle(handle).unwrap(), file_loc);
         assert!(matches!(fs.open(file_loc), Err(FsError::AlreadyOpen(_))));
         assert!(matches!(
             fs.remove_file(file_loc),
             Err(FsError::FileOpen(_))
         ));
         fs.close(handle).unwrap();
+        let reopened = fs.open(file_loc).unwrap();
+        assert_eq!(reopened, FileHandle(0));
+        fs.close(reopened).unwrap();
         fs.remove_file(file_loc).unwrap();
 
         for idx in 0..MAX_OPEN_FILES {

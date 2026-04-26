@@ -137,6 +137,38 @@ impl From<FuseFileType> for FileType {
     }
 }
 
+/// Local clone of [`fuser::FileHandle`] for implementing conversions from [`myfs::FileHandle`].
+#[repr(transparent)]
+struct FuseFileHandle(fuser::FileHandle);
+
+impl From<myfs::FileHandle> for FuseFileHandle {
+    fn from(value: myfs::FileHandle) -> Self {
+        Self(fuser::FileHandle(u64::from(u32::from(value))))
+    }
+}
+
+impl From<FuseFileHandle> for fuser::FileHandle {
+    fn from(value: FuseFileHandle) -> Self {
+        value.0
+    }
+}
+
+impl TryFrom<fuser::FileHandle> for FuseFileHandle {
+    type Error = fuser::Errno;
+
+    fn try_from(value: fuser::FileHandle) -> Result<Self, Self::Error> {
+        u32::try_from(value.0)
+            .map(|_| Self(value))
+            .map_err(|_| fuser::Errno::EBADF)
+    }
+}
+
+impl From<FuseFileHandle> for myfs::FileHandle {
+    fn from(value: FuseFileHandle) -> Self {
+        myfs::FileHandle::from(u32::try_from(value.0.0).unwrap())
+    }
+}
+
 /// Local clone of [`fuser::Errno`] for implementing conversions from [`FsError`].
 #[repr(transparent)]
 struct FuseErrno(fuser::Errno);
@@ -526,31 +558,31 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
     fn open(&self, _: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         debug!("open(ino={}, flags={:#x})", ino.0, flags.0);
         let node = FuseNodeId::from(ino).0;
-        let fs = unwrap_or_reply!(reply, self.lock_fs());
-        let meta = unwrap_or_reply_fs_error!(reply, fs.stat_node(node));
-        if meta.kind == NodeKind::Directory {
-            reply.error(fuser::Errno::EISDIR);
-        } else {
-            reply.opened(fuser::FileHandle(ino.0), FopenFlags::empty());
-        }
+        let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(FuseNodeId::from(node))).0;
+        let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        let handle = unwrap_or_reply_fs_error!(reply, fs.open(loc));
+        reply.opened(
+            fuser::FileHandle::from(FuseFileHandle::from(handle)),
+            FopenFlags::empty(),
+        );
     }
 
     fn read(
         &self,
         _: &Request,
-        ino: INodeNo,
-        _: fuser::FileHandle,
+        _: INodeNo,
+        fh: fuser::FileHandle,
         offset: u64,
         size: u32,
         _: OpenFlags,
         _: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        debug!("read(ino={}, offset={}, size={})", ino.0, offset, size);
+        debug!("read(fh={}, offset={}, size={})", fh.0, offset, size);
         let offset = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(offset));
-        let node = FuseNodeId::from(ino);
-        let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(node)).0;
+        let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let fs = unwrap_or_reply!(reply, self.lock_fs());
+        let loc = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
         let data = unwrap_or_reply_fs_error!(reply, fs.read_file_at(loc, offset, size as usize));
         reply.data(&data);
     }
@@ -558,8 +590,8 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
     fn write(
         &self,
         _: &Request,
-        ino: INodeNo,
-        _: fuser::FileHandle,
+        _: INodeNo,
+        fh: fuser::FileHandle,
         offset: u64,
         data: &[u8],
         _: WriteFlags,
@@ -568,15 +600,15 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         reply: ReplyWrite,
     ) {
         debug!(
-            "write(ino={}, offset={}, bytes={})",
-            ino.0,
+            "write(fh={}, offset={}, bytes={})",
+            fh.0,
             offset,
             data.len()
         );
         let offset = unwrap_or_reply!(reply, Self::unsupported_if_large_offset(offset));
-        let node = FuseNodeId::from(ino);
-        let loc = unwrap_or_reply!(reply, FuseDirEntryLoc::try_from(node)).0;
+        let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        let loc = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
         let written = unwrap_or_reply_fs_error!(reply, fs.write_file_at(loc, offset, data)) as u32;
         reply.written(written);
     }
@@ -584,18 +616,40 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
     fn flush(
         &self,
         _: &Request,
-        ino: INodeNo,
-        _: fuser::FileHandle,
+        _: INodeNo,
+        fh: fuser::FileHandle,
         _: LockOwner,
         reply: ReplyEmpty,
     ) {
-        debug!("flush(ino={})", ino.0);
+        debug!("flush(fh={})", fh.0);
+        let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
+        let fs = unwrap_or_reply!(reply, self.lock_fs());
+        let _ = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
         reply.ok();
     }
 
-    fn fsync(&self, _: &Request, ino: INodeNo, _: fuser::FileHandle, _: bool, reply: ReplyEmpty) {
-        debug!("fsync(ino={})", ino.0);
+    fn release(
+        &self,
+        _: &Request,
+        _: INodeNo,
+        fh: fuser::FileHandle,
+        _: OpenFlags,
+        _: Option<LockOwner>,
+        _: bool,
+        reply: ReplyEmpty,
+    ) {
+        debug!("release(fh={})", fh.0);
+        let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
         let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        ok_or_reply_fs_error!(reply, fs.close(handle));
+        reply.ok();
+    }
+
+    fn fsync(&self, _: &Request, _: INodeNo, fh: fuser::FileHandle, _: bool, reply: ReplyEmpty) {
+        debug!("fsync(fh={})", fh.0);
+        let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
+        let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        let _ = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
         ok_or_reply_fs_error!(reply, fs.sync());
         reply.ok();
     }
@@ -684,6 +738,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
         let parent_cluster = unwrap_or_reply_fs_error!(reply, Self::dir_cluster(&fs, parent));
         let loc = unwrap_or_reply_fs_error!(reply, fs.create_file(parent_cluster, name));
         let meta = unwrap_or_reply_fs_error!(reply, fs.stat(loc));
+        let handle = unwrap_or_reply_fs_error!(reply, fs.open(loc));
         let attr = FileAttr::from(unwrap_or_reply_fs_error!(
             reply,
             FuseFileAttr::try_from((req, self, &meta))
@@ -692,7 +747,7 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
             &TTL_ZERO,
             &attr,
             GENERATION_ZERO,
-            fuser::FileHandle(attr.ino.0),
+            fuser::FileHandle::from(FuseFileHandle::from(handle)),
             FopenFlags::empty(),
         );
     }

@@ -61,13 +61,6 @@ impl ClusterId {
 #[display("{_0}")]
 pub struct BlockId(pub u16);
 
-#[repr(transparent)]
-#[derive(
-    Deref, DerefMut, Display, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod,
-)]
-#[display("{_0}")]
-pub struct FileHandle(pub u32);
-
 /// A timezone-less date with reduced representable range packed into an [`u16`].
 #[repr(transparent)]
 #[derive(Deref, DerefMut, From, Into, Debug, Clone, Copy, PartialEq, Eq, Hash, Zeroable, Pod)]
