@@ -929,19 +929,44 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn truncate(&mut self, loc: DirEntryLoc, new_size: usize) -> Result<(), FsError> {
+        debug!("truncate(loc={loc}, new_size={new_size})");
         let mut fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
         }
 
-        let old_size = usize::try_from(fcb.size).expect("file size must fit into usize");
+        let new_size_u32 = u32::try_from(new_size).map_err(|_| FsError::NoSpace)?;
+        let old_size = usize::try_from(fcb.size).map_err(|_| {
+            FsError::CorruptFs(format!("file size {} does not fit into usize", fcb.size))
+        })?;
         if new_size == old_size {
             return Ok(());
         }
 
         if new_size > old_size {
-            let zero_fill = vec![0; new_size - old_size];
-            self.write_fcb_data_at(loc, fcb, old_size, &zero_fill)?;
+            let old_cluster_count = if old_size == 0 {
+                0
+            } else {
+                old_size.div_ceil(self.cluster_size())
+            };
+            let needed_clusters = new_size.div_ceil(self.cluster_size());
+            fcb = self.ensure_fcb_capacity(fcb, needed_clusters)?;
+            // Roll back on failure.
+            let result = (|| -> Result<(), FsError> {
+                self.zero_fill_chain_range(fcb.start_cluster, old_size, new_size - old_size)?;
+                fcb.size = new_size_u32;
+                fcb.touch()?;
+                self.write_fcb_at(loc, &fcb)
+            })();
+            if let Err(err) = result {
+                self.trim_chain_len(fcb.start_cluster, old_cluster_count)?;
+                return Err(err);
+            }
+            self.open_files
+                .iter_mut()
+                .flatten()
+                .filter(|open| open.loc == loc)
+                .for_each(|open| open.fcb = fcb);
             return Ok(());
         }
 
@@ -953,23 +978,11 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
         if needed_clusters == 0 {
             if fcb.start_cluster != ClusterId::FREE {
-                self.free_chain_from(fcb.start_cluster)?;
+                self.trim_chain_len(fcb.start_cluster, 0)?;
                 fcb.start_cluster = ClusterId::FREE;
             }
         } else {
-            let mut iter = ChainIter::new(self, fcb.start_cluster)?;
-            let last_keep = iter
-                .by_ref()
-                .take(needed_clusters)
-                .try_fold(None, |_, cluster| cluster.map(Some))?
-                .ok_or_else(|| {
-                    FsError::CorruptFs("cluster chain shorter than file size".to_string())
-                })?;
-            let tail = iter.next().transpose()?;
-            self.write_fat(last_keep, FatEntry::EndOfChain)?;
-            if let Some(tail) = tail {
-                self.free_chain_from(tail)?;
-            }
+            self.trim_chain_len(fcb.start_cluster, needed_clusters)?;
             if !new_size.is_multiple_of(self.cluster_size()) {
                 let zero_start = new_size;
                 let zero_len = self.cluster_size() - (new_size % self.cluster_size());
@@ -978,7 +991,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             }
         }
 
-        fcb.size = u32::try_from(new_size).expect("file size exceeds u32 range");
+        fcb.size = new_size_u32;
         fcb.touch()?;
         self.write_fcb_at(loc, &fcb)?;
         self.open_files
@@ -1095,6 +1108,29 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         Ok(fcb)
     }
 
+    fn trim_chain_len(&mut self, start: ClusterId, keep_clusters: usize) -> Result<(), FsError> {
+        if start == ClusterId::FREE {
+            return Ok(());
+        }
+        if keep_clusters == 0 {
+            return self.free_chain_from(start);
+        }
+        let mut iter = ChainIter::new(self, start)?;
+        let last_keep = iter
+            .by_ref()
+            .take(keep_clusters)
+            .try_fold(None, |_, cluster| cluster.map(Some))?
+            .ok_or_else(|| {
+                FsError::CorruptFs("cluster chain shorter than file size".to_string())
+            })?;
+        let tail = iter.next().transpose()?;
+        self.write_fat(last_keep, FatEntry::EndOfChain)?;
+        if let Some(tail) = tail {
+            self.free_chain_from(tail)?;
+        }
+        Ok(())
+    }
+
     fn get_open_file_index(&self, handle: FileHandle) -> Result<usize, FsError> {
         let slot = usize::try_from(handle).map_err(|_| FsError::InvalidHandle(handle))?;
         if slot < self.open_files.len() && self.open_files[slot].is_some() {
@@ -1184,6 +1220,25 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             }
         }
         Ok(fcb)
+    }
+
+    fn zero_fill_chain_range(
+        &mut self,
+        start_cluster: ClusterId,
+        offset: usize,
+        len: usize,
+    ) -> Result<(), FsError> {
+        if len == 0 {
+            return Ok(());
+        }
+        let zeros = vec![0; self.cluster_size().min(256)];
+        let mut written = 0;
+        while written < len {
+            let chunk = (len - written).min(zeros.len());
+            self.write_chain_bytes(start_cluster, offset + written, &zeros[..chunk])?;
+            written += chunk;
+        }
+        Ok(())
     }
 
     /// Read a block on disk.
@@ -1320,15 +1375,23 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn allocate_clusters(&mut self, len: usize) -> Result<Vec<ClusterId>, FsError> {
-        let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            let cluster = (u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()))
-                .map(ClusterId::from)
-                .find(|cluster| self.read_fat(*cluster).ok() == Some(FatEntry::Free))
-                .ok_or(FsError::NoSpace)?;
+        debug!("allocate_clusters(len={len})");
+        let out = (u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()))
+            .map(ClusterId::from)
+            .filter(|cluster| self.read_fat(*cluster).ok() == Some(FatEntry::Free))
+            .take(len)
+            .collect::<Vec<_>>();
+        if out.len() != len {
+            return Err(FsError::NoSpace);
+        }
+        for (index, cluster) in out.iter().copied().enumerate() {
             self.write_fat(cluster, FatEntry::EndOfChain)?;
-            self.zero_cluster(cluster)?;
-            out.push(cluster);
+            if let Err(err) = self.zero_cluster(cluster) {
+                for allocated in out[..=index].iter() {
+                    self.write_fat(*allocated, FatEntry::Free)?;
+                }
+                return Err(err);
+            }
         }
         debug!("allocate_clusters(len={len}): allocated={out:?}");
         Ok(out)
@@ -2343,6 +2406,55 @@ mod tests {
                 .try_fold(0, |acc, cluster| cluster.map(|_| acc + 1))
                 .unwrap(),
             2
+        );
+    }
+
+    #[test]
+    fn failed_truncate_growth_keeps_empty_file_empty() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 4,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "FAIL.BIN").unwrap();
+        assert!(matches!(fs.truncate(loc, 256), Err(FsError::NoSpace)));
+
+        let fcb = fs.read_fcb_at(loc).unwrap();
+        assert_eq!(fcb.size, 0);
+        assert_eq!(fcb.start_cluster, ClusterId::FREE);
+        assert_eq!(
+            fs.read_fat(ROOT_DIR_START_CLUSTER).unwrap(),
+            FatEntry::EndOfChain
+        );
+    }
+
+    #[test]
+    fn failed_truncate_growth_keeps_existing_file_intact() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 5,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "KEEP.BIN").unwrap();
+        fs.write_at(loc, 0, &[b'K'; 64]).unwrap();
+        let start_cluster = fs.read_fcb_at(loc).unwrap().start_cluster;
+
+        assert!(matches!(fs.truncate(loc, 192), Err(FsError::NoSpace)));
+
+        let fcb = fs.read_fcb_at(loc).unwrap();
+        assert_eq!(fcb.size, 64);
+        assert_eq!(fcb.start_cluster, start_cluster);
+        assert_eq!(fs.read_at(loc, 0, 80).unwrap(), vec![b'K'; 64]);
+        assert_eq!(
+            ChainIter::new(&fs, start_cluster)
+                .unwrap()
+                .try_fold(0, |acc, cluster| cluster.map(|_| acc + 1))
+                .unwrap(),
+            1
         );
     }
 
