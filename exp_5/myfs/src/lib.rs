@@ -1684,7 +1684,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_dir_slot_recognizes_unused_and_deleted() {
+    fn parse_dir_slot_states() {
         let unused = [0u8; Fcb::SIZE];
         assert!(matches!(
             DirSlot::try_from(unused.as_slice()).unwrap(),
@@ -1700,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn fs_config_validation_rejects_bad_values() {
+    fn fs_config_rejects_bad_values() {
         assert!(
             FsConfig {
                 block_size: 8,
@@ -1767,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn format_writes_boot_and_two_fat_copies() {
+    fn format_writes_boot_and_fats() {
         let fs = mkmemfs();
         let boot_block = fs.read_device_block(BlockId(0)).unwrap();
         assert_eq!(
@@ -1786,7 +1786,7 @@ mod tests {
     }
 
     #[test]
-    fn open_on_device_reads_formatted_image() {
+    fn open_on_device_reads_image() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("open-on-device.img");
         let config = FsConfig {
@@ -1839,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn file_backed_round_trip_persists_file_data() {
+    fn file_backed_round_trip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file-backed-round-trip.img");
         let config = FsConfig::default();
@@ -1882,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn open_on_device_accepts_backing_file_larger_than_filesystem_image() {
+    fn open_on_device_accepts_larger_backing() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("oversized-backing.img");
         let config = FsConfig {
@@ -1924,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn format_respects_blocks_per_cluster() {
+    fn format_keeps_blocks_per_cluster() {
         let fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 128,
             block_count: 256,
@@ -1937,7 +1937,7 @@ mod tests {
     }
 
     #[test]
-    fn format_accepts_large_non_default_block_size() {
+    fn format_accepts_large_block_size() {
         let fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 2048,
             block_count: 128,
@@ -1950,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn format_rejects_cluster_smaller_than_one_fcb() {
+    fn format_rejects_tiny_cluster() {
         let result = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 16,
             block_count: 128,
@@ -1960,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn root_directory_chain_grows_like_normal_directory() {
+    fn root_dir_chain_grows_normally() {
         let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 64,
             block_count: 256,
@@ -1980,12 +1980,12 @@ mod tests {
     }
 
     #[test]
-    fn fat_block_count_computation_does_not_oscillate() {
+    fn fat_block_count_does_not_oscillate() {
         assert_eq!(get_fat_block_count(128, 256, 2, 4), 2);
     }
 
     #[test]
-    fn node_oriented_api_resolves_and_stats() {
+    fn node_api_resolves_and_stats() {
         let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
         let docs_node = fs.lookup_node(fs.root_node(), "DOCS").unwrap();
@@ -2015,7 +2015,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_fcb_slots_can_cross_block_boundaries() {
+    fn packed_slots_cross_block_boundaries() {
         let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 64,
             block_count: 256,
@@ -2046,7 +2046,7 @@ mod tests {
     }
 
     #[test]
-    fn io_works_with_multi_block_clusters() {
+    fn io_works_with_multi_block_cluster() {
         let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 128,
             block_count: 256,
@@ -2063,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn io_works_with_large_blocks_and_clusters() {
+    fn io_works_with_large_blocks() {
         let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 2048,
             block_count: 128,
@@ -2080,7 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn fat_copies_stay_in_sync_after_mutations() {
+    fn fat_copies_stay_in_sync() {
         let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "SYNC.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
@@ -2094,7 +2094,7 @@ mod tests {
     }
 
     #[test]
-    fn fat_cache_defers_disk_updates_until_sync() {
+    fn fat_cache_defers_sync() {
         let mut fs = mkmemfs();
         let fat1_before = read_fat_copy_bytes(&fs, 0);
         let fat2_before = read_fat_copy_bytes(&fs, 1);
@@ -2121,7 +2121,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_lists_and_removes_directories() {
+    fn directories_create_list_remove() {
         let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
         let docs_cluster = fs.read_fcb_at(docs_loc).unwrap().start_cluster;
@@ -2149,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_reads_and_seeks_across_clusters() {
+    fn io_across_clusters() {
         let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "DATA.BIN").unwrap();
         let handle = fs.open(file_loc).unwrap();
@@ -2175,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn supports_lookup_and_root_stat_from_disk() {
+    fn lookup_and_root_stat() {
         let mut fs = mkmemfs();
         let docs_loc = fs.mkdir(fs.root_dir_cluster(), "DOCS").unwrap();
         let docs_fcb = fs.read_fcb_at(docs_loc).unwrap();
@@ -2192,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn enforces_open_file_rules() {
+    fn open_file_rules() {
         let mut fs = mkmemfs();
         let file_loc = fs.create_file(fs.root_dir_cluster(), "ONE.TXT").unwrap();
         let handle = fs.open(file_loc).unwrap();
@@ -2217,5 +2217,77 @@ mod tests {
         }
         let last_loc = fs.create_file(fs.root_dir_cluster(), "LAST.TXT").unwrap();
         assert!(matches!(fs.open(last_loc), Err(FsError::TooManyOpenFiles)));
+    }
+
+    #[test]
+    fn write_at_crosses_block_boundary() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "PATCH.BIN").unwrap();
+        fs.write_file_at(loc, 0, &[b'A'; 80]).unwrap();
+        fs.write_file_at(loc, 60, b"WXYZ").unwrap();
+
+        let data = fs.read_file_at(loc, 56, 12).unwrap();
+        assert_eq!(&data, b"AAAAWXYZAAAA");
+    }
+
+    #[test]
+    fn read_at_stops_at_eof() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let loc = fs.create_file(fs.root_dir_cluster(), "EOF.BIN").unwrap();
+        fs.write_file_at(loc, 0, b"abcdef").unwrap();
+
+        assert_eq!(fs.read_file_at(loc, 4, 16).unwrap(), b"ef");
+        assert!(fs.read_file_at(loc, 6, 16).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dir_children_grow_across_clusters() {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
+            block_size: 64,
+            block_count: 128,
+            blocks_per_cluster: 1,
+        })
+        .unwrap();
+
+        let dir_loc = fs.mkdir(fs.root_dir_cluster(), "KIDS").unwrap();
+        let dir_cluster = fs.read_fcb_at(dir_loc).unwrap().start_cluster;
+        let mut locs = Vec::new();
+        for idx in 0..6 {
+            let loc = fs.create_file(dir_cluster, &format!("F{idx}.TXT")).unwrap();
+            locs.push(loc);
+        }
+
+        for (idx, loc) in locs.into_iter().enumerate() {
+            let name = format!("F{idx}.TXT");
+            let (found, _) = fs.lookup(dir_cluster, &name).unwrap();
+            assert_eq!(found, loc);
+            let fcb = fs.read_fcb_at(loc).unwrap();
+            assert_eq!(fcb.short_name(), name);
+        }
+        let names = collect_dir_entries(&fs, dir_cluster)
+            .into_iter()
+            .map(|entry| entry.short_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["F0.TXT", "F1.TXT", "F2.TXT", "F3.TXT", "F4.TXT", "F5.TXT"]
+        );
+        let chain = ChainIter::new(&fs, dir_cluster)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(chain.len(), 3);
     }
 }
