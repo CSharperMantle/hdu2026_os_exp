@@ -764,11 +764,12 @@ fn parse_args() -> Result<MountArgs> {
     }
 }
 
-fn open_memory_fs(config: FsConfig) -> Result<MyFileSystem<MemoryBlockDevice>> {
-    MyFileSystem::format_memory(config).with_context(|| "failed to format in-memory filesystem")
+fn open_memory_fs(config: FsConfig) -> Result<MyFileSystem<LogicalBlockDevice<MemoryBackend>>> {
+    MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(config)
+        .with_context(|| "failed to format in-memory filesystem")
 }
 
-fn open_image_fs(path: &PathBuf) -> Result<MyFileSystem<LogicalBlockDevice<FileBlockDevice>>> {
+fn open_image_fs(path: &PathBuf) -> Result<MyFileSystem<LogicalBlockDevice<FileBackend>>> {
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -779,7 +780,7 @@ fn open_image_fs(path: &PathBuf) -> Result<MyFileSystem<LogicalBlockDevice<FileB
         .with_context(|| "failed to read boot sector")?;
     let boot =
         BootSector::read_from_prefix(&boot_bytes).with_context(|| "failed to parse boot sector")?;
-    let device = FileBlockDevice::from_file(file, usize::from(boot.block_size))
+    let device = FileBackend::from_file(file, usize::from(boot.block_size))
         .with_context(|| "failed to build file-backed device")?;
     let device = LogicalBlockDevice::new(device, usize::from(boot.block_size))
         .with_context(|| "failed to build logical block adapter")?;

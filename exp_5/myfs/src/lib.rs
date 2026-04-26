@@ -522,15 +522,16 @@ pub struct MyFileSystem<D: BufferedBlockDevice> {
     next_handle: u32,
 }
 
-impl MyFileSystem<MemoryBlockDevice> {
+impl MyFileSystem<LogicalBlockDevice<MemoryBackend>> {
     /// Format a given region of memory according to the provided [`FsConfig`].
     ///
     /// This is a fast specialization for memory-backed FS.
     pub fn format_memory(config: FsConfig) -> Result<Self, FsError> {
-        let device = MemoryBlockDevice::new(
+        let physical = MemoryBackend::new(
             usize::from(config.block_size),
             usize::from(config.block_count),
         );
+        let device = LogicalBlockDevice::new(physical, usize::from(config.block_size))?;
         Self::format_on_device(device, config)
     }
 }
@@ -1587,8 +1588,8 @@ mod tests {
     use std::fs::OpenOptions;
     use tempfile::tempdir;
 
-    fn mkmemfs() -> MyFileSystem<MemoryBlockDevice> {
-        MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())
+    fn mkmemfs() -> MyFileSystem<LogicalBlockDevice<MemoryBackend>> {
+        MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig::default())
             .expect("filesystem should format")
     }
 
@@ -1596,7 +1597,7 @@ mod tests {
         path: &std::path::Path,
         block_size: usize,
         block_count: usize,
-    ) -> LogicalBlockDevice<FileBlockDevice> {
+    ) -> LogicalBlockDevice<FileBackend> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1605,13 +1606,16 @@ mod tests {
             .open(path)
             .unwrap();
         LogicalBlockDevice::new(
-            FileBlockDevice::create(file, block_size, block_count).unwrap(),
+            FileBackend::create(file, block_size, block_count).unwrap(),
             block_size,
         )
         .unwrap()
     }
 
-    fn read_fat_copy_bytes(fs: &MyFileSystem<MemoryBlockDevice>, copy: usize) -> Vec<u8> {
+    fn read_fat_copy_bytes(
+        fs: &MyFileSystem<LogicalBlockDevice<MemoryBackend>>,
+        copy: usize,
+    ) -> Vec<u8> {
         let fat_start = usize::from(u16::from(fs.boot.fat_start_block));
         let fat_blocks = usize::from(fs.boot.fat_block_count);
         let mut out = Vec::with_capacity(fat_blocks * usize::from(fs.boot.block_size));
@@ -1624,7 +1628,7 @@ mod tests {
     }
 
     fn collect_dir_entries(
-        fs: &MyFileSystem<MemoryBlockDevice>,
+        fs: &MyFileSystem<LogicalBlockDevice<MemoryBackend>>,
         dir_start: ClusterId,
     ) -> Vec<DirEntry> {
         fs.dir_entries(dir_start)
@@ -1760,7 +1764,7 @@ mod tests {
 
         let reopened = MyFileSystem::open_on_device(
             LogicalBlockDevice::new(
-                FileBlockDevice::from_file(
+                FileBackend::from_file(
                     OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -1810,7 +1814,7 @@ mod tests {
 
         let reopened = MyFileSystem::open_on_device(
             LogicalBlockDevice::new(
-                FileBlockDevice::from_file(
+                FileBackend::from_file(
                     OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -1850,7 +1854,7 @@ mod tests {
 
         let reopened = MyFileSystem::open_on_device(
             LogicalBlockDevice::new(
-                FileBlockDevice::from_file(
+                FileBackend::from_file(
                     OpenOptions::new()
                         .read(true)
                         .write(true)
@@ -1875,7 +1879,7 @@ mod tests {
 
     #[test]
     fn format_respects_blocks_per_cluster() {
-        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 128,
             block_count: 256,
             blocks_per_cluster: 4,
@@ -1888,7 +1892,7 @@ mod tests {
 
     #[test]
     fn format_accepts_large_non_default_block_size() {
-        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 2048,
             block_count: 128,
             blocks_per_cluster: 2,
@@ -1901,7 +1905,7 @@ mod tests {
 
     #[test]
     fn format_rejects_cluster_smaller_than_one_fcb() {
-        let result = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let result = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 16,
             block_count: 128,
             blocks_per_cluster: 1,
@@ -1911,7 +1915,7 @@ mod tests {
 
     #[test]
     fn root_directory_chain_grows_like_normal_directory() {
-        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 64,
             block_count: 256,
             blocks_per_cluster: 1,
@@ -1966,7 +1970,7 @@ mod tests {
 
     #[test]
     fn packed_fcb_slots_can_cross_block_boundaries() {
-        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 64,
             block_count: 256,
             blocks_per_cluster: 2,
@@ -1997,7 +2001,7 @@ mod tests {
 
     #[test]
     fn io_works_with_multi_block_clusters() {
-        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 128,
             block_count: 256,
             blocks_per_cluster: 4,
@@ -2014,7 +2018,7 @@ mod tests {
 
     #[test]
     fn io_works_with_large_blocks_and_clusters() {
-        let mut fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig {
+        let mut fs = MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig {
             block_size: 2048,
             block_count: 128,
             blocks_per_cluster: 8,

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use myfs::FileBlockDevice;
+use myfs::FileBackend;
 use myfs::FsConfig;
 use myfs::LogicalBlockDevice;
 use myfs::MyFileSystem;
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         .write(true)
         .open(&image_path)
         .with_context(|| format!("failed to open image {}", image_path.display()))?;
-    let device = FileBlockDevice::create(
+    let device = FileBackend::create(
         file,
         usize::from(config.block_size),
         usize::from(config.block_count),

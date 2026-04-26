@@ -8,18 +8,6 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::io::Write;
 
-/// Abstraction of logical block I/O used by the current filesystem core.
-///
-/// FIXME: This borrowed-slice API is RAM-shaped. Later stages should migrate
-/// `MyFileSystem` to the fallible buffer-based device traits below.
-pub trait BlockDevice {
-    fn block_size(&self) -> usize;
-    fn block_count(&self) -> usize;
-    fn read_block(&self, index: BlockId) -> &[u8];
-    fn write_block(&mut self, index: BlockId, data: &[u8]);
-    fn zero_block(&mut self, index: BlockId);
-}
-
 /// Physical device block identifier.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +34,8 @@ pub trait PhysicalBlockDevice {
 }
 
 /// Fallible logical-block I/O layered over physical blocks.
+///
+/// This is directly consumed by [`crate::MyFileSystem`].
 pub trait BufferedBlockDevice {
     fn block_size(&self) -> usize;
     fn block_count(&self) -> usize;
@@ -55,28 +45,6 @@ pub trait BufferedBlockDevice {
     fn zero_block(&mut self, index: BlockId) -> Result<(), FsError> {
         let zeros = vec![0; self.block_size()];
         self.write_block_from(index, &zeros)
-    }
-}
-
-impl<T: BufferedBlockDevice + ?Sized> BufferedBlockDevice for Box<T> {
-    fn block_size(&self) -> usize {
-        (**self).block_size()
-    }
-
-    fn block_count(&self) -> usize {
-        (**self).block_count()
-    }
-
-    fn read_block_into(&mut self, index: BlockId, dst: &mut [u8]) -> Result<(), FsError> {
-        (**self).read_block_into(index, dst)
-    }
-
-    fn write_block_from(&mut self, index: BlockId, src: &[u8]) -> Result<(), FsError> {
-        (**self).write_block_from(index, src)
-    }
-
-    fn zero_block(&mut self, index: BlockId) -> Result<(), FsError> {
-        (**self).zero_block(index)
     }
 }
 
@@ -197,17 +165,14 @@ impl<P: PhysicalBlockDevice> BufferedBlockDevice for LogicalBlockDevice<P> {
     }
 }
 
-/// RAM-backed device.
-///
-/// It still implements the old borrowed-slice logical trait for current
-/// `MyFileSystem`, and also implements the new physical trait for later stages.
+/// RAM-backed physical device.
 #[derive(Debug)]
-pub struct MemoryBlockDevice {
+pub struct MemoryBackend {
     block_size: usize,
     blocks: Vec<Vec<u8>>,
 }
 
-impl MemoryBlockDevice {
+impl MemoryBackend {
     pub fn new(block_size: usize, block_count: usize) -> Self {
         Self {
             block_size,
@@ -216,85 +181,7 @@ impl MemoryBlockDevice {
     }
 }
 
-impl BlockDevice for MemoryBlockDevice {
-    fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    fn block_count(&self) -> usize {
-        self.blocks.len()
-    }
-
-    fn read_block(&self, index: BlockId) -> &[u8] {
-        &self.blocks[usize::from(u16::from(index))]
-    }
-
-    fn write_block(&mut self, index: BlockId, data: &[u8]) {
-        let block = &mut self.blocks[usize::from(u16::from(index))];
-        block.copy_from_slice(data);
-    }
-
-    fn zero_block(&mut self, index: BlockId) {
-        self.blocks[usize::from(u16::from(index))].fill(0);
-    }
-}
-
-impl BufferedBlockDevice for MemoryBlockDevice {
-    fn block_size(&self) -> usize {
-        self.block_size
-    }
-
-    fn block_count(&self) -> usize {
-        self.blocks.len()
-    }
-
-    fn read_block_into(&mut self, index: BlockId, dst: &mut [u8]) -> Result<(), FsError> {
-        if dst.len() != self.block_size {
-            return Err(FsError::InvalidConfig(format!(
-                "buffer size {} does not match logical block size {}",
-                dst.len(),
-                self.block_size
-            )));
-        }
-        let block = self
-            .blocks
-            .get(usize::from(u16::from(index)))
-            .ok_or_else(|| {
-                FsError::InvalidConfig(format!(
-                    "logical block {} outside device range {}",
-                    u16::from(index),
-                    self.blocks.len()
-                ))
-            })?;
-        dst.copy_from_slice(block);
-        Ok(())
-    }
-
-    fn write_block_from(&mut self, index: BlockId, src: &[u8]) -> Result<(), FsError> {
-        if src.len() != self.block_size {
-            return Err(FsError::InvalidConfig(format!(
-                "buffer size {} does not match logical block size {}",
-                src.len(),
-                self.block_size
-            )));
-        }
-        let block_count = self.blocks.len();
-        let block = self
-            .blocks
-            .get_mut(usize::from(u16::from(index)))
-            .ok_or_else(|| {
-                FsError::InvalidConfig(format!(
-                    "logical block {} outside device range {}",
-                    u16::from(index),
-                    block_count
-                ))
-            })?;
-        block.copy_from_slice(src);
-        Ok(())
-    }
-}
-
-impl PhysicalBlockDevice for MemoryBlockDevice {
+impl PhysicalBlockDevice for MemoryBackend {
     fn physical_block_size(&self) -> usize {
         self.block_size
     }
@@ -348,13 +235,13 @@ impl PhysicalBlockDevice for MemoryBlockDevice {
 
 /// File-backed physical block device.
 #[derive(Debug)]
-pub struct FileBlockDevice {
+pub struct FileBackend {
     file: File,
     block_size: usize,
     block_count: usize,
 }
 
-impl FileBlockDevice {
+impl FileBackend {
     pub fn from_file(file: File, block_size: usize) -> Result<Self, FsError> {
         if block_size == 0 {
             return Err(FsError::InvalidConfig(
@@ -418,7 +305,7 @@ impl FileBlockDevice {
     }
 }
 
-impl PhysicalBlockDevice for FileBlockDevice {
+impl PhysicalBlockDevice for FileBackend {
     fn physical_block_size(&self) -> usize {
         self.block_size
     }
@@ -469,21 +356,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn memory_block_device_reads_writes_and_zeros_blocks() {
-        let mut dev = MemoryBlockDevice::new(8, 4);
-        assert_eq!(BlockDevice::block_size(&dev), 8);
-        assert_eq!(BlockDevice::block_count(&dev), 4);
-
-        dev.write_block(BlockId(2), &[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(dev.read_block(BlockId(2)), &[1, 2, 3, 4, 5, 6, 7, 8]);
-
-        BlockDevice::zero_block(&mut dev, BlockId(2));
-        assert_eq!(dev.read_block(BlockId(2)), &[0, 0, 0, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn memory_block_device_supports_physical_buffer_io() {
-        let mut dev = MemoryBlockDevice::new(4, 3);
+    fn memory_backend_supports_physical_buffer_io() {
+        let mut dev = MemoryBackend::new(4, 3);
         dev.write_physical_block(PhysicalBlockId(1), &[9, 8, 7, 6])
             .unwrap();
 
@@ -500,7 +374,7 @@ mod tests {
 
     #[test]
     fn logical_block_device_reads_and_writes_multiple_physical_blocks() {
-        let inner = MemoryBlockDevice::new(4, 8);
+        let inner = MemoryBackend::new(4, 8);
         let mut dev = LogicalBlockDevice::new(inner, 8).unwrap();
         assert_eq!(dev.block_size(), 8);
         assert_eq!(dev.block_count(), 4);
@@ -514,22 +388,41 @@ mod tests {
     }
 
     #[test]
+    fn logical_block_device_over_memory_supports_equal_size_blocks() {
+        let inner = MemoryBackend::new(8, 4);
+        let mut dev = LogicalBlockDevice::new(inner, 8).unwrap();
+        assert_eq!(dev.block_size(), 8);
+        assert_eq!(dev.block_count(), 4);
+
+        dev.write_block_from(BlockId(2), &[1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap();
+
+        let mut out = [0u8; 8];
+        dev.read_block_into(BlockId(2), &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 5, 6, 7, 8]);
+
+        dev.zero_block(BlockId(2)).unwrap();
+        dev.read_block_into(BlockId(2), &mut out).unwrap();
+        assert_eq!(out, [0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
     fn logical_block_device_rejects_invalid_block_size_relation() {
-        let inner = MemoryBlockDevice::new(8, 8);
+        let inner = MemoryBackend::new(8, 8);
         assert!(LogicalBlockDevice::new(inner, 4).is_err());
 
-        let inner = MemoryBlockDevice::new(6, 8);
+        let inner = MemoryBackend::new(6, 8);
         assert!(LogicalBlockDevice::new(inner, 8).is_err());
     }
 
     #[test]
     fn logical_block_device_rejects_partial_tail() {
-        let inner = MemoryBlockDevice::new(4, 7);
+        let inner = MemoryBackend::new(4, 7);
         assert!(LogicalBlockDevice::new(inner, 8).is_err());
     }
 
     #[test]
-    fn file_block_device_reads_writes_and_zeros_blocks() {
+    fn file_backend_reads_writes_and_zeros_blocks() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("file-block-device.img");
         let file = OpenOptions::new()
@@ -539,7 +432,7 @@ mod tests {
             .truncate(true)
             .open(&path)
             .unwrap();
-        let mut dev = FileBlockDevice::create(file, 4, 3).unwrap();
+        let mut dev = FileBackend::create(file, 4, 3).unwrap();
 
         dev.write_physical_block(PhysicalBlockId(1), &[1, 2, 3, 4])
             .unwrap();
@@ -558,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn logical_block_device_works_on_file_block_device() {
+    fn logical_block_device_works_on_file_backend() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("logical-file-block-device.img");
         let file = OpenOptions::new()
@@ -568,7 +461,7 @@ mod tests {
             .truncate(true)
             .open(&path)
             .unwrap();
-        let inner = FileBlockDevice::create(file, 4, 8).unwrap();
+        let inner = FileBackend::create(file, 4, 8).unwrap();
         let mut dev = LogicalBlockDevice::new(inner, 8).unwrap();
 
         dev.write_block_from(BlockId(2), &[9, 8, 7, 6, 5, 4, 3, 2])

@@ -13,14 +13,15 @@ fn main() -> Result<()> {
 }
 
 struct Shell {
-    fs: MyFileSystem<MemoryBlockDevice>,
+    fs: MyFileSystem<LogicalBlockDevice<MemoryBackend>>,
     cwd_cluster: ClusterId,
     cwd_path: String,
 }
 
 impl Shell {
     fn new() -> Result<Self> {
-        let fs = MyFileSystem::<MemoryBlockDevice>::format_memory(FsConfig::default())?;
+        let fs =
+            MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig::default())?;
         Ok(Self {
             cwd_cluster: fs.root_dir_cluster(),
             cwd_path: "/".to_string(),
