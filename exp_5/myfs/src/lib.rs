@@ -613,15 +613,9 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         block[..BootSector::SIZE].copy_from_slice(fs.boot.as_bytes());
         fs.write_device_block(BlockId(0), &block)?;
 
-        // Init all FAT copies.
-        for copy in 0..fs.boot.fat_copies {
-            let start = fs.fat_start_block_of(copy);
-            for block in 0..fs.boot.fat_block_count {
-                fs.zero_device_block(BlockId::from(u16::from(start) + block))?;
-            }
-        }
-
         // Init root dir chain.
+        fs.write_fat(ClusterId(0), FatEntry::EndOfChain)?;  // FAT catch-all
+        fs.write_fat(ClusterId(1), FatEntry::EndOfChain)?;  // FAT EOC marker
         fs.write_fat(fs.boot.root_dir_start_cluster, FatEntry::EndOfChain)?;
         fs.zero_cluster(fs.boot.root_dir_start_cluster)?;
 
@@ -1274,7 +1268,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn cluster_first_block(&self, cluster: ClusterId) -> Result<BlockId, FsError> {
-        if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
+        if cluster > self.max_cluster_id() {
             return Err(FsError::CorruptFs(format!(
                 "cluster {} outside data region",
                 cluster
@@ -1306,7 +1300,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     /// Get FAT block position of one cluster entry.
     fn fat_pos_of(&self, cluster: ClusterId) -> Result<(usize, usize), FsError> {
-        if cluster < ROOT_DIR_START_CLUSTER || cluster > self.max_cluster_id() {
+        if cluster > self.max_cluster_id() {
             return Err(FsError::CorruptFs(format!(
                 "cluster {} outside data region",
                 cluster
@@ -1347,16 +1341,17 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     fn flush_fat(&mut self, copy_idx: u16) -> Result<(), FsError> {
         trace!("flush_fat(copy_idx={copy_idx})");
-        let mut bytes =
-            vec![0; usize::from(self.boot.fat_block_count) * usize::from(self.boot.block_size)];
+        // HACK: For byte order conversion.
+        let size = usize::from(self.boot.fat_block_count) * usize::from(self.boot.block_size);
+        let mut bytes = vec![0; size];
+        if self.fat_m.len() * FatEntry::SIZE != size {
+            return Err(FsError::CorruptFs(
+                "fat cache larger than on-disk FAT region".to_string(),
+            ));
+        }
         for (index, entry) in self.fat_m.iter().copied().enumerate() {
             let start = index * FatEntry::SIZE;
             let end = start + FatEntry::SIZE;
-            if end > bytes.len() {
-                return Err(FsError::CorruptFs(
-                    "fat cache larger than on-disk FAT region".to_string(),
-                ));
-            }
             bytes[start..end].copy_from_slice(&u16::from(entry).to_le_bytes());
         }
         let start_block = self.fat_start_block_of(copy_idx);
@@ -1364,7 +1359,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             let start = block_offset * usize::from(self.boot.block_size);
             let end = start + usize::from(self.boot.block_size);
             self.write_device_block(
-                BlockId::from(u16::from(start_block) + u16::try_from(block_offset).unwrap()),
+                BlockId::from(
+                    u16::from(start_block)
+                        + u16::try_from(block_offset).map_err(|_| {
+                            FsError::CorruptFs(format!(
+                                "block offset {block_offset} not representable by usize"
+                            ))
+                        })?,
+                ),
                 &bytes[start..end],
             )?;
         }
