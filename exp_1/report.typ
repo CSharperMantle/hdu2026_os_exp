@@ -6,7 +6,7 @@
     《操作系统课程实践》\
     实验报告\
   ],
-  subtitle: [],
+  subtitle: [实验1：Linux 内核添加系统调用],
   class: "计算机科学英才班",
   department: "卓越学院",
   authors: "鲍溶",

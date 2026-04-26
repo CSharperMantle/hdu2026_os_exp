@@ -6,7 +6,7 @@
     《操作系统课程实践》\
     实验报告\
   ],
-  subtitle: [],
+  subtitle: [实验3：模拟 Shell 及进程通信],
   class: "计算机科学英才班",
   department: "卓越学院",
   authors: "鲍溶",
