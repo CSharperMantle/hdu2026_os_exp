@@ -747,7 +747,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             .position(Option::is_none)
             .ok_or(FsError::TooManyOpenFiles)?;
         let handle = FileHandle(self.next_handle);
-        self.next_handle += 1;
+        self.next_handle = self.next_handle.wrapping_add(1);
         self.open_files[slot] = Some(OpenFile {
             handle,
             loc,
