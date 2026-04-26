@@ -256,11 +256,13 @@ impl<D: BufferedBlockDevice + Send> TryFrom<(&Request, &FuseMyFileSystem<D>, &No
     fn try_from(
         (req, owner, meta): (&Request, &FuseMyFileSystem<D>, &NodeMeta),
     ) -> Result<Self, Self::Error> {
+        let allocated_bytes =
+            meta.size.div_ceil(owner.cluster_size as u32) as u64 * owner.cluster_size as u64;
         let mtime = SystemTime::from(FuseSystemTime::try_from(meta)?);
         Ok(Self(FileAttr {
             ino: INodeNo::from(FuseNodeId::from(meta.node_id)),
             size: u64::from(meta.size),
-            blocks: u64::from(meta.size).div_ceil(512),
+            blocks: allocated_bytes.div_ceil(512),
             atime: mtime,
             mtime,
             ctime: mtime,
@@ -289,14 +291,17 @@ impl From<FuseFileAttr> for FileAttr {
 struct FuseMyFileSystem<D: BufferedBlockDevice + Send> {
     fs: Mutex<MyFileSystem<D>>,
     block_size: u16,
+    cluster_size: u16,
 }
 
 impl<D: BufferedBlockDevice + Send> FuseMyFileSystem<D> {
     fn new(fs: MyFileSystem<D>) -> Self {
         let block_size = fs.boot_sector().block_size;
+        let cluster_size = fs.boot_sector().blocks_per_cluster * block_size;
         Self {
             fs: Mutex::new(fs),
             block_size,
+            cluster_size,
         }
     }
 
