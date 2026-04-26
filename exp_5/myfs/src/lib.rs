@@ -991,6 +991,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         for open in self.open_files.iter_mut().flatten() {
             if open.loc == loc {
                 open.fcb = fcb;
+                open.cursor = open.cursor.min(new_size);
             }
         }
         Ok(())
