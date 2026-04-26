@@ -259,16 +259,16 @@ pub struct BootSector {
     pub root_dir_start_cluster: ClusterId,
 }
 
-pub const BOOT_SECTOR_SIZE: usize = std::mem::size_of::<BootSector>();
-
 impl BootSector {
+    pub const SIZE: usize = std::mem::size_of::<BootSector>();
+
     pub fn as_bytes(&self) -> &[u8] {
         bytemuck::bytes_of(self)
     }
 
     pub fn read_from_prefix(bytes: &[u8]) -> Result<Self, FsError> {
         let bytes = bytes
-            .get(..BOOT_SECTOR_SIZE)
+            .get(..Self::SIZE)
             .ok_or_else(|| FsError::CorruptFs("boot sector shorter than expected".to_string()))?;
         Ok(bytemuck::pod_read_unaligned(bytes))
     }
@@ -328,13 +328,6 @@ impl Fcb {
         Ok(())
     }
 
-    pub fn read_from_bytes(bytes: &[u8]) -> Result<Self, FsError> {
-        let bytes = bytes
-            .get(..Fcb::SIZE)
-            .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
-        Ok(bytemuck::pod_read_unaligned(bytes))
-    }
-
     pub(crate) fn set_mdatetime(&mut self, mdatetime: DateTime<Utc>) -> Result<(), FsError> {
         self.mtime = mdatetime.try_into()?;
         self.mdate = mdatetime.try_into()?;
@@ -344,6 +337,17 @@ impl Fcb {
     pub(crate) fn touch(&mut self) -> Result<(), FsError> {
         self.set_mdatetime(Utc::now())?;
         Ok(())
+    }
+}
+
+impl TryFrom<&[u8]> for Fcb {
+    type Error = FsError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let bytes = value
+            .get(..Fcb::SIZE)
+            .ok_or_else(|| FsError::CorruptFs("fcb slot shorter than expected".to_string()))?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
     }
 }
 
@@ -386,7 +390,7 @@ mod tests {
             data_start_block: BlockId(3),
             root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
         };
-        assert_eq!(boot.as_bytes().len(), BOOT_SECTOR_SIZE);
+        assert_eq!(boot.as_bytes().len(), BootSector::SIZE);
         assert_eq!(BootSector::read_from_prefix(boot.as_bytes()).unwrap(), boot);
     }
 
@@ -394,7 +398,7 @@ mod tests {
     fn fcb_bytes_round_trip() {
         let fcb = Fcb::new("A.TXT", NodeKind::File, ClusterId(7), 123, Utc::now()).unwrap();
         assert_eq!(fcb.as_bytes().len(), Fcb::SIZE);
-        assert_eq!(Fcb::read_from_bytes(fcb.as_bytes()).unwrap(), fcb);
+        assert_eq!(Fcb::try_from(fcb.as_bytes()).unwrap(), fcb);
     }
 
     #[test]

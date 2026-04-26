@@ -158,7 +158,7 @@ impl Shell {
                 self.fs.sync()?;
                 println!("synced");
             }
-            "fat" => print!("{}", self.fs.dump_fat()),
+            "fat" => print!("{}", self.fs.display_fat()),
             "stat" => {
                 let target = self
                     .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: stat <path>"))?)?;

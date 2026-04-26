@@ -715,7 +715,13 @@ enum MountArgs {
 struct Args {
     #[arg(short = 'M', conflicts_with = "image", help = "Use memory-backed mode")]
     memory: bool,
-    #[arg(short = 'i', long, value_name = "IMAGE", conflicts_with = "memory", help = "Path to the formatted image")]
+    #[arg(
+        short = 'i',
+        long,
+        value_name = "IMAGE",
+        conflicts_with = "memory",
+        help = "Path to the formatted image"
+    )]
     image: Option<PathBuf>,
     #[arg(long, requires = "memory", help = "Set the lock size of the image")]
     block_size: Option<u16>,
@@ -768,7 +774,7 @@ fn open_image_fs(path: &PathBuf) -> Result<MyFileSystem<LogicalBlockDevice<FileB
         .write(true)
         .open(path)
         .with_context(|| "failed to open image read-write")?;
-    let mut boot_bytes = vec![0; BOOT_SECTOR_SIZE];
+    let mut boot_bytes = vec![0; BootSector::SIZE];
     file.read_exact(&mut boot_bytes)
         .with_context(|| "failed to read boot sector")?;
     let boot =
