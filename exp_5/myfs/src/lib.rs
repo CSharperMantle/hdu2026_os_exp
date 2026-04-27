@@ -1401,8 +1401,8 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         debug!("free_chain_from(start={start})");
         // FIXME: Bad performance; for immutability compromise
         let clusters = ChainIter::new(self, start)?.collect::<Vec<_>>();
-        for cluster in clusters {
-            let cluster = cluster?;
+        for cluster in clusters.iter().rev() {
+            let cluster = cluster.to_owned()?;
             self.write_fat(cluster, FatEntry::Free)?;
             self.zero_cluster(cluster)?;
         }
