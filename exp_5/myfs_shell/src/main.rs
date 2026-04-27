@@ -1,5 +1,8 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use derive_more::Deref;
+use derive_more::DerefMut;
+use derive_more::Display;
 use std::io;
 use std::io::Write;
 
@@ -10,10 +13,91 @@ enum ControlFlow {
     Exit,
 }
 
+#[repr(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Deref, DerefMut, Display)]
+#[deref(forward)]
+#[deref_mut(forward)]
+#[display("{_0}")]
+struct CanonicalPath(String);
+
+impl CanonicalPath {
+    pub fn root() -> Self {
+        Default::default()
+    }
+
+    pub fn from_cwd_str(cwd: &CanonicalPath, raw: &str) -> Result<Self> {
+        if raw.is_empty() {
+            return Err(anyhow!("empty path"));
+        }
+
+        let joined = if raw.starts_with('/') {
+            raw.to_string()
+        } else if cwd.0 == "/" {
+            format!("/{raw}")
+        } else {
+            format!("{}/{}", cwd, raw)
+        };
+
+        let mut stack: Vec<String> = Vec::new();
+        for part in joined.split('/') {
+            if part.is_empty() || part == "." {
+                continue;
+            }
+            if part == ".." {
+                stack.pop();
+                continue;
+            }
+            stack.push(part.to_ascii_uppercase());
+        }
+
+        if stack.is_empty() {
+            Ok(Self("/".to_owned()))
+        } else {
+            Ok(Self(format!("/{}", stack.join("/"))))
+        }
+    }
+}
+
+impl Default for CanonicalPath {
+    fn default() -> Self {
+        Self("/".to_owned())
+    }
+}
+
+enum ResolvedTarget {
+    Root,
+    Entry {
+        loc: DirEntryLoc,
+        fcb: Fcb,
+        path: CanonicalPath,
+    },
+}
+
+impl ResolvedTarget {
+    fn loc(&self) -> Option<DirEntryLoc> {
+        match self {
+            ResolvedTarget::Root => None,
+            ResolvedTarget::Entry { loc, .. } => Some(*loc),
+        }
+    }
+
+    fn as_dir_cluster(&self) -> Result<ClusterId> {
+        match self {
+            ResolvedTarget::Root => Err(anyhow!("target is root, handle separately")),
+            ResolvedTarget::Entry { fcb, .. } => {
+                if fcb.kind()? != NodeKind::Directory {
+                    return Err(anyhow!("target is not directory"));
+                }
+                Ok(fcb.start_cluster)
+            }
+        }
+    }
+}
+
 struct Shell {
     fs: MyFileSystem<LogicalBlockDevice<MemoryBackend>>,
     cwd_cluster: ClusterId,
-    cwd_path: String,
+    cwd_path: CanonicalPath,
 }
 
 impl Shell {
@@ -22,7 +106,7 @@ impl Shell {
             MyFileSystem::<LogicalBlockDevice<MemoryBackend>>::format_memory(FsConfig::default())?;
         Ok(Self {
             cwd_cluster: fs.root_dir_cluster(),
-            cwd_path: "/".to_string(),
+            cwd_path: Default::default(),
             fs,
         })
     }
@@ -61,9 +145,9 @@ impl Shell {
                 let target =
                     self.resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: cd <path>"))?)?;
                 match target {
-                    ResolvedTarget::Root { path } => {
+                    ResolvedTarget::Root => {
                         self.cwd_cluster = self.fs.root_dir_cluster();
-                        self.cwd_path = path;
+                        self.cwd_path = CanonicalPath::root();
                     }
                     ResolvedTarget::Entry { fcb, path, .. } => {
                         if fcb.kind()? != NodeKind::Directory {
@@ -77,7 +161,7 @@ impl Shell {
             "ls" => {
                 let target_cluster = if let Some(path) = parts.get(1) {
                     match self.resolve_target(path)? {
-                        ResolvedTarget::Root { .. } => self.fs.root_dir_cluster(),
+                        ResolvedTarget::Root => self.fs.root_dir_cluster(),
                         entry => entry.as_dir_cluster()?,
                     }
                 } else {
@@ -171,7 +255,7 @@ impl Shell {
                 let target = self
                     .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: stat <path>"))?)?;
                 match target {
-                    ResolvedTarget::Root { .. } => {
+                    ResolvedTarget::Root => {
                         let entry = self.fs.stat_root()?;
                         self.print_root_stat(&entry);
                     }
@@ -190,9 +274,9 @@ impl Shell {
     }
 
     fn resolve_target(&self, raw: &str) -> Result<ResolvedTarget> {
-        let canonical = self.canonicalize_path(raw)?;
-        if canonical == "/" {
-            return Ok(ResolvedTarget::Root { path: canonical });
+        let canonical = CanonicalPath::from_cwd_str(&self.cwd_path, raw)?;
+        if canonical == CanonicalPath::root() {
+            return Ok(ResolvedTarget::Root);
         }
 
         let mut current = self.fs.root_dir_cluster();
@@ -211,41 +295,9 @@ impl Shell {
         })
     }
 
-    fn canonicalize_path(&self, raw: &str) -> Result<String> {
-        if raw.is_empty() {
-            return Err(anyhow!("empty path"));
-        }
-
-        let joined = if raw.starts_with('/') {
-            raw.to_string()
-        } else if self.cwd_path == "/" {
-            format!("/{raw}")
-        } else {
-            format!("{}/{}", self.cwd_path, raw)
-        };
-
-        let mut stack: Vec<String> = Vec::new();
-        for part in joined.split('/') {
-            if part.is_empty() || part == "." {
-                continue;
-            }
-            if part == ".." {
-                stack.pop();
-                continue;
-            }
-            stack.push(part.to_ascii_uppercase());
-        }
-
-        if stack.is_empty() {
-            Ok("/".to_string())
-        } else {
-            Ok(format!("/{}", stack.join("/")))
-        }
-    }
-
     fn resolve_parent_and_name(&self, raw: &str) -> Result<(ClusterId, String)> {
-        let canonical = self.canonicalize_path(raw)?;
-        if canonical == "/" {
+        let canonical = CanonicalPath::from_cwd_str(&self.cwd_path, raw)?;
+        if canonical == CanonicalPath::root() {
             return Err(anyhow!("invalid path"));
         }
         let (parent_path, name) = canonical.rsplit_once('/').map_or(
@@ -262,7 +314,7 @@ impl Shell {
             return Err(anyhow!("invalid path"));
         }
         let parent_cluster = match self.resolve_target(parent_path)? {
-            ResolvedTarget::Root { .. } => self.fs.root_dir_cluster(),
+            ResolvedTarget::Root => self.fs.root_dir_cluster(),
             ResolvedTarget::Entry { fcb, .. } => {
                 if fcb.kind()? != NodeKind::Directory {
                     return Err(anyhow!("parent is not directory"));
@@ -347,38 +399,6 @@ impl Shell {
                 file.fcb.start_cluster,
                 file.fcb.short_name()
             );
-        }
-    }
-}
-
-enum ResolvedTarget {
-    Root {
-        path: String,
-    },
-    Entry {
-        loc: DirEntryLoc,
-        fcb: Fcb,
-        path: String,
-    },
-}
-
-impl ResolvedTarget {
-    fn loc(&self) -> Option<DirEntryLoc> {
-        match self {
-            ResolvedTarget::Root { .. } => None,
-            ResolvedTarget::Entry { loc, .. } => Some(*loc),
-        }
-    }
-
-    fn as_dir_cluster(&self) -> Result<ClusterId> {
-        match self {
-            ResolvedTarget::Root { .. } => Err(anyhow!("target is root, handle separately")),
-            ResolvedTarget::Entry { fcb, .. } => {
-                if fcb.kind()? != NodeKind::Directory {
-                    return Err(anyhow!("target is not directory"));
-                }
-                Ok(fcb.start_cluster)
-            }
         }
     }
 }
