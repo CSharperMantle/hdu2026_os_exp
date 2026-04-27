@@ -187,7 +187,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Configurable parameters of [`MyFileSystem`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct FsConfig {
     pub block_size: u16,
     pub block_count: u16,
@@ -614,8 +614,8 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         fs.write_device_block(BlockId(0), &block)?;
 
         // Init root dir chain.
-        fs.write_fat(ClusterId(0), FatEntry::EndOfChain)?;  // FAT catch-all
-        fs.write_fat(ClusterId(1), FatEntry::EndOfChain)?;  // FAT EOC marker
+        fs.write_fat(ClusterId(0), FatEntry::EndOfChain)?; // FAT catch-all
+        fs.write_fat(ClusterId(1), FatEntry::EndOfChain)?; // FAT EOC marker
         fs.write_fat(fs.boot.root_dir_start_cluster, FatEntry::EndOfChain)?;
         fs.zero_cluster(fs.boot.root_dir_start_cluster)?;
 
@@ -1913,7 +1913,7 @@ mod tests {
                 usize::from(config.block_size),
                 usize::from(config.block_count),
             ),
-            config.clone(),
+            config,
         )
         .unwrap();
         fs.create_file(fs.root_dir_cluster(), "HELLO.TXT").unwrap();
@@ -1962,7 +1962,7 @@ mod tests {
                 usize::from(config.block_size),
                 usize::from(config.block_count),
             ),
-            config.clone(),
+            config,
         )
         .unwrap();
         let loc = fs.create_file(fs.root_dir_cluster(), "NOTE.TXT").unwrap();
@@ -2003,8 +2003,7 @@ mod tests {
             blocks_per_cluster: 2,
         };
 
-        let mut fs =
-            MyFileSystem::format_on_device(mkfiledev(&path, 128, 96), config.clone()).unwrap();
+        let mut fs = MyFileSystem::format_on_device(mkfiledev(&path, 128, 96), config).unwrap();
         fs.create_file(fs.root_dir_cluster(), "BIGFILE.TXT")
             .unwrap();
         fs.sync().unwrap();
