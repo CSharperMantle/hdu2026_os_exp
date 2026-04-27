@@ -650,8 +650,10 @@ impl<D: BufferedBlockDevice + Send + 'static> Filesystem for FuseMyFileSystem<D>
     ) {
         debug!("flush(fh={})", fh.0);
         let handle = myfs::FileHandle::from(unwrap_or_reply!(reply, FuseFileHandle::try_from(fh)));
-        let fs = unwrap_or_reply!(reply, self.lock_fs());
+        let mut fs = unwrap_or_reply!(reply, self.lock_fs());
+        // Sanity check handle.
         let _ = unwrap_or_reply_fs_error!(reply, fs.loc_of_handle(handle));
+        unwrap_or_reply_fs_error!(reply, fs.sync());
         reply.ok();
     }
 
