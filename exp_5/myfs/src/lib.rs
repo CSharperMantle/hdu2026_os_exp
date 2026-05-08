@@ -1540,7 +1540,7 @@ fn get_fat_block_count(
         let data_clusters = (u32::from(block_count) - data_start) / u32::from(blocks_per_cluster);
         let fat_entries = usize::from(u16::from(ROOT_DIR_START_CLUSTER))
             + usize::try_from(data_clusters).unwrap();
-        let fat_bytes = fat_entries * 2;
+        let fat_bytes = fat_entries * std::mem::size_of::<ClusterId>();
         let needed = fat_bytes.div_ceil(usize::from(block_size)) as u16;
         if needed <= fat_blocks {
             return fat_blocks;
