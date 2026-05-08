@@ -547,7 +547,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     /// Read parameters from the underlying device and open a filesystem from it.
     pub fn open_on_device(mut device: D) -> Result<Self, FsError> {
         let boot = read_boot_sector_from_device(&mut device)?;
-        validate_boot_sector_against_device(&boot, &device)?;
+        validate_boot_sector_against_device(&device, &boot)?;
         let fat_m = read_fat_cache_from_device(&mut device, &boot)?;
 
         debug!(
@@ -1502,10 +1502,12 @@ fn get_fat_block_count(
     fat_copies: u16,
     blocks_per_cluster: u16,
 ) -> u16 {
+    // Initial guess.
     let mut fat_blocks = 1u16;
     loop {
         let data_start = 1u32 + u32::from(fat_copies) * u32::from(fat_blocks);
         if data_start >= u32::from(block_count) {
+            // All blocks are occupied by FAT.
             return fat_blocks;
         }
         let data_clusters = (u32::from(block_count) - data_start) / u32::from(blocks_per_cluster);
@@ -1533,8 +1535,8 @@ fn read_boot_sector_from_device<D: BufferedBlockDevice>(
 }
 
 fn validate_boot_sector_against_device<D: BufferedBlockDevice>(
-    boot: &BootSector,
     device: &D,
+    boot: &BootSector,
 ) -> Result<(), FsError> {
     if usize::from(boot.block_size) != device.block_size() {
         return Err(FsError::CorruptFs(format!(

@@ -39,20 +39,20 @@
 == 类 FAT16 文件系统结构设计
 
 #paragraph([设备抽象与盘上组织])[
-  按照教科书要求，实验中实现的磁盘布局为经简化的类 FAT16 结构@wikipedia2026fat。如@figure:disk 所示，逻辑块 0 为引导扇区，包含描述文件系统结构参数的元数据。其后依次为两份互为冗余的文件分配表副本 FAT#sub[1] 和 FAT#sub[2]。每个 FAT 表项为 2 字节。剩余区域为数据区域，用于存放目录与文件内容。与 FAT16 不同，本设计不设独立的根目录区域，而是将根目录作为一普通目录文件存放于数据区域起始处，起始簇号为 2，支持通过 FAT 链扩展按需增长。盘簇 0 的 FAT 表项作为空指针节点恒置为链结束标记，盘簇 1 同理。
+  实验中的文件系统采用分层设备抽象将存储介质的物理细节与核心逻辑解耦。如@figure:phys-blocks 所示，物理块设备抽象层以固定大小的物理块为单位提供原始读写能力；上层逻辑块设备适配器将多个物理块合并为更大的逻辑块供文件系统核心使用，逻辑块大小须为物理块大小的整数倍。这种分层设计使得文件系统核心逻辑可在内存模拟、磁盘文件镜像、未来的块设备后端等不同底层设备之间复用，而无需修改核心代码。
 ]
 
 #img(
-  image("assets/disk.png", width: 85%),
-  caption: [类 FAT16 文件系统结构],
-) <figure:disk>
-
-实验中的文件系统采用分层设备抽象将存储介质的物理细节与核心逻辑解耦。如@figure:phys-blocks 所示，物理块设备抽象层以固定大小的物理块为单位提供原始读写能力；上层逻辑块设备适配器将多个物理块合并为更大的逻辑块供文件系统核心使用，逻辑块大小须为物理块大小的整数倍。这种分层设计使得文件系统核心逻辑可在内存模拟、磁盘文件镜像、未来的块设备后端等不同底层设备之间复用，而无需修改核心代码。
-
-#img(
-  image("assets/phys_blocks.png", width: 60%),
+  image("assets/phys_blocks.png", width: 85%),
   caption: [物理块、逻辑块与 FAT 簇的关系],
 ) <figure:phys-blocks>
+
+按照教科书要求，实验中实现的磁盘布局为经简化的类 FAT16 结构@wikipedia2026fat。如@figure:disk 所示，逻辑块 0 为引导扇区，包含描述文件系统结构参数的元数据。其后依次为两份互为冗余的文件分配表副本 FAT#sub[1] 和 FAT#sub[2]。每个 FAT 表项为 2 字节。剩余区域为数据区域，用于存放目录与文件内容。与 FAT16 不同，本设计不设独立的根目录区域，而是将根目录作为一普通目录文件存放于数据区域起始处，起始簇号为 2，支持通过 FAT 链扩展按需增长。盘簇 0 的 FAT 表项作为空指针节点恒置为链结束标记，盘簇 1 同理。
+
+#img(
+  image("assets/disk.png", width: 85%),
+  caption: [类 FAT16 文件系统结构（图中大小未按比例缩放）],
+) <figure:disk>
 
 #paragraph([引导信息扇区结构])[
   引导扇区存储于物理块 0 的前缀位置，以固定长度记录文件系统的几何配置。其字段包括块大小、磁盘总块数、每簇块数、FAT 起始块号、每份 FAT 副本的块数、FAT 副本数、数据区域起始块号以及根目录起始簇号。重新打开已格式化磁盘时须从引导扇区读取这些参数并与实际设备信息进行一致性校验，以确保挂载的正确性。
@@ -62,15 +62,15 @@
   文件控制块（FCB）是文件系统目录项的基本单元，以固定长度 16 字节记录文件的元信息。其字段包括文件名与扩展名、标记区分文件与目录的属性字节、修改时间与日期、文件起始簇号以及文件大小。文件名采用 FAT 标准的存储格式，使用大写 ASCII 编码，不足部分以空格填充；修改日期采用 FAT 风格的位压缩编码：日期占 7 位年份、4 位月份和 5 位日期，时间占 5 位小时、6 位分钟和 5 位秒数。
 ]
 
-目录文件本身由连续排列的 FCB 构成，每簇可容纳多个 FCB 项。由于 FCB 大小不一定为簇大小的因子，在每簇尾部允许出现少量浪费空间。
-
 #img(
-  image("assets/fcb_layout.png", width: 60%),
+  image("assets/fcb_layout.png", width: 80%),
   caption: [文件控制块结构],
 ) <figure:fcb-layout>
 
+目录文件本身由连续排列的 FCB 构成，每簇可容纳多个 FCB 项。由于 FCB 大小不一定为簇大小的因子，在每簇尾部允许出现少量内部碎片。
+
 #paragraph([文件分配表结构])[
-  文件分配表（FAT）是连续的 16 位表项数组，表项语义包括空闲簇、链中下一簇号和链尾（EOC）三种。FAT 的大小确定是一个特殊的迭代收敛问题。如@code:fat-sizing 所示，$B$ 为块大小，$N$ 为磁盘总块数，$C$ 为每簇块数。算法以 1 块为初始猜测，计算当前 FAT 大小能容纳的簇条目数及数据区域实际需要的簇数，若 FAT 寻址能力不足则增大 FAT 块数后重复上述过程直至收敛。
+  文件分配表（FAT）是连续的 16 位表项数组，表项语义包括空闲簇、链中下一簇号和链尾（EOC）三种。FAT 的大小确定是一个特殊的迭代收敛问题。如@code:fat-sizing 所示，$B$ 为块大小，$N$ 为磁盘总块数，$C$ 为每簇块数。算法以 1 块为初始状态，计算当前 FAT 大小能容纳的簇条目数及数据区域实际需要的簇数，若 FAT 寻址能力不足则增大 FAT 块数后重复上述过程直至收敛。
 ]
 
 #code(
@@ -107,7 +107,7 @@
   function create_file(parent, name):
       key := normalize(name)
       if lookup(parent, key) succeeds:
-          return error(AlreadyExists)
+          error AlreadyExists
       slot := fill_free_slot(parent)
       fcb := new_fcb(key, attr=FILE, start=FREE, size=0)
       write_fcb(slot, fcb)
@@ -124,7 +124,7 @@
   function read_at(loc, offset, len):
       fcb := read_fcb(loc)
       if fcb.attr == DIRECTORY:
-          return error(IsADirectory)
+          error IsADirectory
       if offset >= fcb.size:
           return empty
       read_len := min(len, fcb.size - offset)
@@ -142,18 +142,21 @@
   function truncate(loc, new_size):
       fcb := read_fcb(loc)
       if new_size == fcb.size:
-          return
-      if new_size > fcb.size:                     // 扩展
+          ok
+      if new_size > fcb.size:
+          // 增大文件
           old := cluster_count(fcb)
           needed := Ceil(new_size / CLUSTER_SIZE)
           ensure_chain_capacity(fcb, needed)
           if failed:
-              return error(NoSpace)
+              error NoSpace
           zero_fill(fcb.start, fcb.size, new_size - fcb.size)
-          if failed:                              // 回滚
+          if failed:
+              // 空间不足，需撤销操作
               trim_chain_len(fcb.start, old)
-              return error(NoSpace)
-      else:                                        // 缩小
+              error NoSpace
+      else:
+          // 缩小文件
           needed := Ceil(new_size / CLUSTER_SIZE)
           if needed == 0:
               free_full_chain(fcb.start)
@@ -164,6 +167,7 @@
       fcb.size := new_size
       write_fcb(loc, fcb)
       clamp_open_cursors(loc, new_size)
+      ok
   ```,
   caption: [文件截断（缩小与扩展）],
 ) <code:truncate>
@@ -184,7 +188,12 @@ FAT 标准的短名称格式为 8.3（文件名 8 字节加扩展名 3 字节，
 
 文件系统的核心结构体 `MyFileSystem<D>` 封装了可变设备 `D`。若将所有读取操作为 `&mut self`，会导致无法在持有簇迭代器或目录槽位迭代器的同时进行任何修改操作。文件系统大量不修改文件系统状态的查询操作（如读取文件元数据、查找文件等）也必须扩散 `&mut` 要求，严重牺牲 API 的可用性。本实验使用 `RefCell<D>` 包裹设备，使得读取类 API 可保持 `&self` 签名，在运行时由 `RefCell` 执行借用检查。该方案以最小代价保证了 API 接口与实现的简洁与正确性。
 
-文件操作中需要遍历 FAT 链读取簇内容。若采用先读取完整链再处理的策略，当文件包含大量簇时会产生不必要的内存拷贝与分配开销。本实验使用 `ChainIter` 迭代器从起始簇号出发跟随 FAT 表项逐簇推进，内部通过 `HashSet` 记录已访问簇以检测循环。目录遍历同样使用两层迭代器完成：`DirSlotIter` 遍历原始槽位并处理每簇末尾的尾部松弛浪费，`DirEntryIter` 在其基础上过滤已占用项并解码为面向用户的目录条目。迭代器的惰性求值特性使得链遍历与目录扫描仅在访问发生时按需推进，无需提前将全部数据复制至内存。
+文件操作中需要遍历 FAT 链读取簇内容。若采用先读取完整链再处理的策略，当文件包含大量簇时会产生不必要的内存拷贝与分配开销。如@figure:cluster-stream-view 所示，本实验使用 `ChainIter` 迭代器从起始簇号出发跟随 FAT 表项逐簇推进，内部通过 `HashSet` 记录已访问簇以检测循环。目录遍历同样使用两层迭代器完成：`DirSlotIter` 遍历原始槽位并处理每簇末尾的内部碎片区域，`DirEntryIter` 在其基础上过滤已占用项并解码为面向用户的目录条目。迭代器的惰性求值特性使得链遍历与目录扫描仅在访问发生时按需推进，无需提前将全部数据复制至内存。
+
+#img(
+  image("assets/cluster_stream_view.png", width: 70%),
+  caption: [迭代器暴露的簇链视图],
+) <figure:cluster-stream-view>
 
 == 实现文件系统核心库 libmyfs
 
