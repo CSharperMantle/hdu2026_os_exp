@@ -302,10 +302,10 @@ impl<'a, D: BufferedBlockDevice> Iterator for ChainIter<'a, D> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let cursor = self.cursor?;
-        trace!("ChainIter::next(): start={}, cursor={cursor}", self.start);
+        trace!(target: "myfs", "ChainIter::next(): start={}, cursor={cursor}", self.start);
         // Is there a cycle?
         if !self.visited.insert(cursor) {
-            trace!("ChainIter::next(): loop detected");
+            trace!(target: "myfs", "ChainIter::next(): loop detected");
             self.cursor = None;
             return Some(Err(FsError::CorruptFs(format!(
                 "FAT chain loop detected at {}",
@@ -315,7 +315,7 @@ impl<'a, D: BufferedBlockDevice> Iterator for ChainIter<'a, D> {
 
         match self.fs.read_fat(cursor) {
             Ok(FatEntry::Free) => {
-                trace!("ChainIter::next(): reached free entry");
+                trace!(target: "myfs", "ChainIter::next(): reached free entry");
                 self.cursor = None;
                 Some(Err(FsError::CorruptFs(format!(
                     "cluster chain from {} reaches free entry",
@@ -323,17 +323,17 @@ impl<'a, D: BufferedBlockDevice> Iterator for ChainIter<'a, D> {
                 ))))
             }
             Ok(FatEntry::EndOfChain) => {
-                trace!("ChainIter::next(): reached EOC");
+                trace!(target: "myfs", "ChainIter::next(): reached EOC");
                 self.cursor = None;
                 Some(Ok(cursor))
             }
             Ok(FatEntry::Next(next)) => {
-                trace!("ChainIter::next(): advance");
+                trace!(target: "myfs", "ChainIter::next(): advance");
                 self.cursor = Some(next);
                 Some(Ok(cursor))
             }
             Err(err) => {
-                trace!("ChainIter::next(): error: {err}");
+                trace!(target: "myfs", "ChainIter::next(): error: {err}");
                 self.cursor = None;
                 Some(Err(err))
             }
@@ -360,7 +360,7 @@ struct DirSlotIter<'a, D: BufferedBlockDevice> {
 impl<'a, D: BufferedBlockDevice> DirSlotIter<'a, D> {
     fn new(fs: &'a MyFileSystem<D>, dir_start: ClusterId) -> Result<Self, FsError> {
         let entries_per_cluster = fs.cluster_size() / Fcb::SIZE;
-        trace!(
+        trace!(target: "myfs",
             "DirSlotIter::new(dir_start={dir_start}): entries_per_cluster={entries_per_cluster}"
         );
         Ok(Self {
@@ -379,12 +379,12 @@ impl<'a, D: BufferedBlockDevice> Iterator for DirSlotIter<'a, D> {
     type Item = Result<(DirEntryLoc, DirSlot), FsError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        trace!("DirSlotIter::next(): dir_start={}", self.dir_start);
+        trace!(target: "myfs", "DirSlotIter::next(): dir_start={}", self.dir_start);
         if self.cluster.is_none() || self.index_in_cluster == self.entries_per_cluster {
             // Either we have just started, or we have exhausted the current cluster.
             // Load a new one.
             let cluster = unwrap_or_ret_some_err!(self.chain_iter.next()?);
-            trace!("DirSlotIter::next(): load new cluster at {cluster}");
+            trace!(target: "myfs", "DirSlotIter::next(): load new cluster at {cluster}");
             let cluster = unwrap_or_ret_some_err!(self.fs.read_cluster_bytes(cluster));
             self.cluster = Some(cluster);
             self.index_in_cluster = 0;
@@ -484,6 +484,8 @@ impl MyFileSystem<LogicalBlockDevice<MemoryBackend>> {
 impl<D: BufferedBlockDevice> MyFileSystem<D> {
     /// Format a given underlying device according to the provided [`FsConfig`].
     pub fn format_on_device(device: D, config: FsConfig) -> Result<Self, FsError> {
+        debug!(target: "myfs", "format_on_device(block_size={}, block_count={}, blocks_per_cluster={})",
+            config.block_size, config.block_count, config.blocks_per_cluster);
         config.validate()?;
         if device.block_size() != usize::from(config.block_size) {
             return Err(FsError::InvalidConfig(format!(
@@ -516,7 +518,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             data_start_block: BlockId(1 + fat_block_count * 2),
             root_dir_start_cluster: ROOT_DIR_START_CLUSTER,
         };
-        debug!(
+        debug!(target: "myfs",
             "format_on_device(block_size={}, block_count={}, blocks_per_cluster={}): fat_blocks={}",
             config.block_size, config.block_count, config.blocks_per_cluster, fat_block_count
         );
@@ -546,11 +548,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     /// Read parameters from the underlying device and open a filesystem from it.
     pub fn open_on_device(mut device: D) -> Result<Self, FsError> {
+        debug!(target: "myfs", "open_on_device()");
         let boot = read_boot_sector_from_device(&mut device)?;
         validate_boot_sector_against_device(&device, &boot)?;
         let fat_m = read_fat_cache_from_device(&mut device, &boot)?;
 
-        debug!(
+        debug!(target: "myfs",
             "open_on_device(block_size={}, block_count={}, blocks_per_cluster={}): fat_blocks={}",
             boot.block_size, boot.block_count, boot.blocks_per_cluster, boot.fat_block_count
         );
@@ -574,6 +577,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     /// Get [`NodeMeta`] of the root directory.
     pub fn stat_root(&self) -> Result<NodeMeta, FsError> {
+        debug!(target: "myfs", "stat_root()");
         Ok(NodeMeta {
             loc: None,
             short_name: "/".to_string(),
@@ -588,13 +592,13 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     /// Look up a child entry with the provided name in the specified parent directory.
     pub fn lookup(&self, parent_dir: ClusterId, name: &str) -> Result<(DirEntryLoc, Fcb), FsError> {
         let key = normalize_component(name)?;
-        debug!("lookup(parent_dir={parent_dir}, name={key})");
+        debug!(target: "myfs", "lookup(parent_dir={parent_dir}, name={key})");
         for slot in self.dir_slots(parent_dir)? {
             let (loc, slot) = slot?;
             if let DirSlot::Occupied(fcb) = slot
                 && fcb.short_name() == key
             {
-                debug!("lookup hit. loc={loc}");
+                trace!(target: "myfs", "lookup hit. loc={loc}");
                 return Ok((loc, fcb));
             }
         }
@@ -603,6 +607,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     /// Get [`NodeMeta`] of specified directory entry.
     pub fn stat(&self, loc: DirEntryLoc) -> Result<NodeMeta, FsError> {
+        debug!(target: "myfs", "stat(loc={loc})");
         let fcb = self.read_fcb_at(loc)?;
         self.node_meta_from_fcb(loc, fcb)
     }
@@ -618,6 +623,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         name: &str,
     ) -> Result<DirEntryLoc, FsError> {
         let key = normalize_component(name)?;
+        debug!(target: "myfs", "create_file(parent_dir={parent_dir}, name={key})");
         if self.lookup(parent_dir, &key).is_ok() {
             return Err(FsError::InvalidPath(format!("{key} already exists")));
         }
@@ -625,12 +631,13 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         let fcb = Fcb::new(&key, NodeKind::File, ClusterId::FREE, 0, Utc::now())?;
         self.write_fcb_at(loc, &fcb)?;
         self.refresh_dir_size(parent_dir)?;
-        debug!("create_file(parent_dir={parent_dir}, name={key}): loc={loc}");
+        debug!(target: "myfs", "create_file(parent_dir={parent_dir}, name={key}): loc={loc}");
         Ok(loc)
     }
 
     pub fn mkdir(&mut self, parent_dir: ClusterId, name: &str) -> Result<DirEntryLoc, FsError> {
         let key = normalize_component(name)?;
+        debug!(target: "myfs", "mkdir(parent_dir={parent_dir}, name={key})");
         if self.lookup(parent_dir, &key).is_ok() {
             return Err(FsError::InvalidPath(format!("{key} already exists")));
         }
@@ -639,13 +646,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         let fcb = Fcb::new(&key, NodeKind::Directory, new_cluster, 0, Utc::now())?;
         self.write_fcb_at(loc, &fcb)?;
         self.refresh_dir_size(parent_dir)?;
-        debug!(
+        debug!(target: "myfs",
             "mkdir(parent_dir={parent_dir}, name={key}): loc={loc}, start_cluster={new_cluster}"
         );
         Ok(loc)
     }
 
     pub fn rm(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
+        debug!(target: "myfs", "rm(loc={loc})");
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -656,11 +664,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         self.free_chain_from(fcb.start_cluster)?;
         self.delete_dir_slot(loc)?;
         self.refresh_dir_size(loc.dir_start)?;
-        debug!("remove_file(loc={loc})");
+        debug!(target: "myfs", "remove_file(loc={loc})");
         Ok(())
     }
 
     pub fn rmdir(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
+        debug!(target: "myfs", "rmdir(loc={loc})");
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? != NodeKind::Directory {
             return Err(FsError::NotADirectory(fcb.short_name()));
@@ -673,11 +682,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         self.free_chain_from(fcb.start_cluster)?;
         self.delete_dir_slot(loc)?;
         self.refresh_dir_size(loc.dir_start)?;
-        debug!("rmdir(loc={loc})");
+        debug!(target: "myfs", "rmdir(loc={loc})");
         Ok(())
     }
 
     pub fn open(&mut self, loc: DirEntryLoc) -> Result<FileHandle, FsError> {
+        debug!(target: "myfs", "open(loc={loc})");
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -697,12 +707,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             cursor: 0,
             fcb,
         });
-        debug!("open(loc={loc}): handle={handle}");
+        debug!(target: "myfs", "open(loc={loc}): handle={handle}");
         Ok(handle)
     }
 
     pub fn close_handle(&mut self, handle: FileHandle) -> Result<(), FsError> {
-        debug!("close(handle={handle})");
+        debug!(target: "myfs", "close(handle={handle})");
         self.open_files[self.get_open_file_index(handle)?] = None;
         Ok(())
     }
@@ -728,7 +738,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn seek_handle(&mut self, handle: FileHandle, pos: usize) -> Result<(), FsError> {
-        debug!("seek(handle={handle}, pos={pos})");
+        debug!(target: "myfs", "seek(handle={handle}, pos={pos})");
         let file = self.get_open_file_mut(handle)?;
         let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
         if pos > file_size {
@@ -739,6 +749,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn read_handle(&mut self, handle: FileHandle, len: usize) -> Result<Vec<u8>, FsError> {
+        debug!(target: "myfs", "read_handle(handle={handle}, len={len})");
         let file = self.get_open_file(handle)?;
         let file_size = usize::try_from(file.fcb.size).expect("file size must fit into usize");
         let read_len = len.min(file_size.saturating_sub(file.cursor));
@@ -752,6 +763,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn read_at(&self, loc: DirEntryLoc, offset: usize, len: usize) -> Result<Vec<u8>, FsError> {
+        debug!(target: "myfs", "read_at(loc={loc}, offset={offset}, len={len})");
         let fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -766,8 +778,8 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     pub fn write_handle(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
         let file = self.get_open_file(handle)?.to_owned();
-        debug!(
-            "write(handle={handle}, loc={}, cursor={}, bytes={})",
+        debug!(target: "myfs",
+            "write_handle(handle={handle}, loc={}, cursor={}, len={})",
             file.loc,
             file.cursor,
             data.len()
@@ -789,13 +801,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         offset: usize,
         data: &[u8],
     ) -> Result<usize, FsError> {
+        debug!(target: "myfs", "write_at(loc={loc}, offset={offset}, len={})", data.len());
         let fcb = self.read_fcb_at(loc)?;
         self.write_fcb_data_at(loc, fcb, offset, data)?;
         Ok(data.len())
     }
 
     pub fn truncate(&mut self, loc: DirEntryLoc, new_size: usize) -> Result<(), FsError> {
-        debug!("truncate(loc={loc}, new_size={new_size})");
+        debug!(target: "myfs", "truncate(loc={loc}, new_size={new_size})");
         let mut fcb = self.read_fcb_at(loc)?;
         if fcb.kind()? == NodeKind::Directory {
             return Err(FsError::IsADirectory(fcb.short_name()));
@@ -870,12 +883,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn truncate_handle(&mut self, handle: FileHandle, new_size: usize) -> Result<(), FsError> {
+        debug!(target: "myfs", "truncate_handle(handle={handle}, new_size={new_size})");
         let file = self.get_open_file(handle)?;
         self.truncate(file.loc, new_size)
     }
 
     /// Set modification time of an entry.
     pub fn set_mtime(&mut self, loc: DirEntryLoc, mtime: DateTime<Utc>) -> Result<(), FsError> {
+        debug!(target: "myfs", "set_mtime(loc={loc}, mtime={mtime})");
         let mut fcb = self.read_fcb_at(loc)?;
         fcb.set_mdatetime(mtime)?;
         self.write_fcb_at(loc, &fcb)?;
@@ -884,7 +899,6 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 open.fcb = fcb;
             }
         }
-        debug!("set_mtime(loc={loc}, mtime={mtime})");
         Ok(())
     }
 
@@ -894,11 +908,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     /// Flush the FAT to disk if needed.
     pub fn sync(&mut self) -> Result<(), FsError> {
+        debug!(target: "myfs", "sync()");
         if !self.fat_dirty {
-            trace!("sync(): not dirty");
+            trace!(target: "myfs", "sync(): not dirty");
             return Ok(());
         }
-        debug!("sync(): dirty");
+        debug!(target: "myfs", "sync(): dirty");
         for copy_idx in 0..self.boot.fat_copies {
             self.flush_fat(copy_idx)?;
         }
@@ -948,7 +963,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             return Ok(fcb);
         }
         let extra = self.allocate_clusters(needed_clusters - current)?;
-        debug!(
+        trace!(target: "myfs",
             "ensure_fcb_chain_capacity(start_cluster={}, current_clusters={current}, needed_clusters={needed_clusters}): added_clusters={}",
             fcb.start_cluster,
             extra.len()
@@ -1194,14 +1209,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         let offset = fat_offset(cluster);
         let block_offset = offset / usize::from(self.boot.block_size);
         let byte_offset = offset % usize::from(self.boot.block_size);
-        trace!(
+        trace!(target: "myfs",
             "fat_pos_of(cluster={cluster}): block_offset={block_offset}, byte_offset={byte_offset}"
         );
         Ok((block_offset, byte_offset))
     }
 
     fn read_fat(&self, cluster: ClusterId) -> Result<FatEntry, FsError> {
-        trace!("read_fat(cluster={cluster})");
+        trace!(target: "myfs", "read_fat(cluster={cluster})");
         // Assert position sanity
         let _ = self.fat_pos_of(cluster)?;
         if self.fat_m.len() != fat_entry_count(self.boot.block_size, self.boot.fat_block_count) {
@@ -1216,7 +1231,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn write_fat(&mut self, cluster: ClusterId, value: FatEntry) -> Result<(), FsError> {
-        trace!("write_fat(cluster={cluster}, value={value})");
+        trace!(target: "myfs", "write_fat(cluster={cluster}, value={value})");
         // Assert position sanity
         let _ = self.fat_pos_of(cluster)?;
         self.fat_m[usize::from(u16::from(cluster))] = value;
@@ -1225,7 +1240,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn flush_fat(&mut self, copy_idx: u16) -> Result<(), FsError> {
-        trace!("flush_fat(copy_idx={copy_idx})");
+        trace!(target: "myfs", "flush_fat(copy_idx={copy_idx})");
         // HACK: For byte order conversion.
         let size = usize::from(self.boot.fat_block_count) * usize::from(self.boot.block_size);
         let mut bytes = vec![0; size];
@@ -1259,7 +1274,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn allocate_clusters(&mut self, len: usize) -> Result<Vec<ClusterId>, FsError> {
-        debug!("allocate_clusters(len={len})");
+        debug!(target: "myfs", "allocate_clusters(len={len})");
         let out = (u16::from(ROOT_DIR_START_CLUSTER)..=u16::from(self.max_cluster_id()))
             .map(ClusterId::from)
             .filter(|cluster| self.read_fat(*cluster).ok() == Some(FatEntry::Free))
@@ -1277,12 +1292,12 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 return Err(err);
             }
         }
-        debug!("allocate_clusters(len={len}): allocated={out:?}");
+        trace!(target: "myfs", "allocate_clusters(len={len}): allocated={out:?}");
         Ok(out)
     }
 
     fn free_chain_from(&mut self, start: ClusterId) -> Result<(), FsError> {
-        debug!("free_chain_from(start={start})");
+        trace!(target: "myfs", "free_chain_from(start={start})");
         // FIXME: Bad performance; for immutability compromise
         let clusters = ChainIter::new(self, start)?.collect::<Vec<_>>();
         for cluster in clusters.iter().rev() {
@@ -1302,7 +1317,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         offset: usize,
         len: usize,
     ) -> Result<Vec<u8>, FsError> {
-        trace!("read_chain_bytes(start={start}, offset={offset}, len={len})");
+        trace!(target: "myfs", "read_chain_bytes(start={start}, offset={offset}, len={len})");
         if len == 0 {
             return Ok(Vec::new());
         }
@@ -1319,7 +1334,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             let cluster_bytes = self.read_cluster_bytes(cluster)?;
             let in_cluster = cursor % cluster_size;
             let chunk = remaining.min(cluster_size - in_cluster);
-            trace!("read chain chunk. cluster={cluster}, in_cluster={in_cluster}, chunk={chunk}");
+            trace!(target: "myfs", "read chain chunk. cluster={cluster}, in_cluster={in_cluster}, chunk={chunk}");
             out.extend_from_slice(&cluster_bytes[in_cluster..in_cluster + chunk]);
             cursor += chunk;
             remaining -= chunk;
@@ -1340,7 +1355,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             return Ok(());
         }
         let len = data.len();
-        trace!("write_chain_bytes(start={start}, offset={offset}, len={len})");
+        trace!(target: "myfs", "write_chain_bytes(start={start}, offset={offset}, len={len})");
         let cluster_size = self.cluster_size();
         let mut remaining = data.len();
         let mut cursor = offset;
@@ -1354,7 +1369,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             let mut cluster_bytes = self.read_cluster_bytes(cluster)?;
             let in_cluster = cursor % cluster_size;
             let chunk = remaining.min(cluster_size - in_cluster);
-            trace!("write chain chunk. cluster={cluster}, in_cluster={in_cluster}, chunk={chunk}");
+            trace!(target: "myfs", "write chain chunk. cluster={cluster}, in_cluster={in_cluster}, chunk={chunk}");
             cluster_bytes[in_cluster..in_cluster + chunk]
                 .copy_from_slice(&data[written..written + chunk]);
             self.write_cluster_bytes(cluster, &cluster_bytes)?;
@@ -1399,7 +1414,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn read_dir_slot(&self, loc: DirEntryLoc) -> Result<DirSlot, FsError> {
-        trace!(
+        trace!(target: "myfs",
             "read_slot(dir_start={}, entry_index={})",
             loc.dir_start, loc.entry_index
         );
@@ -1409,14 +1424,14 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     fn write_fcb_at(&mut self, loc: DirEntryLoc, fcb: &Fcb) -> Result<(), FsError> {
-        trace!("write_fcb_at(loc={loc}): short_name={}", fcb.short_name());
+        trace!(target: "myfs", "write_fcb_at(loc={loc}): short_name={}", fcb.short_name());
         let mut bytes = [0; Fcb::SIZE];
         fcb.write_to_slice(&mut bytes)?;
         self.write_chain_bytes(loc.dir_start, self.slot_offset_in_chain(loc), &bytes)
     }
 
     fn delete_dir_slot(&mut self, loc: DirEntryLoc) -> Result<(), FsError> {
-        trace!("delete_dir_slot(loc={loc})");
+        trace!(target: "myfs", "delete_dir_slot(loc={loc})");
         let mut bytes = [0; Fcb::SIZE];
         bytes[0] = DirSlot::SLOT_DELETED;
         self.write_chain_bytes(loc.dir_start, self.slot_offset_in_chain(loc), &bytes)
@@ -1437,13 +1452,13 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
 
     fn fill_free_dir_slot(&mut self, dir_start: ClusterId) -> Result<DirEntryLoc, FsError> {
         let mut next_entry_index = 0u32;
-        trace!("find_free_dir_slot(dir_start={dir_start})");
+        trace!(target: "myfs", "find_free_dir_slot(dir_start={dir_start})");
         for slot in self.dir_slots(dir_start)? {
             let (loc, slot) = slot?;
             next_entry_index = loc.entry_index + 1;
             match slot {
                 DirSlot::Unused | DirSlot::Deleted => {
-                    trace!(
+                    trace!(target: "myfs",
                         "found free dir slot. dir_start={dir_start}, entry_index={}",
                         loc.entry_index
                     );
@@ -1460,7 +1475,7 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
                 "chain head cluster {} invalid",
                 dir_start
             )))?;
-        debug!(
+        trace!(target: "myfs",
             "extend directory chain. dir_start={dir_start}, last_cluster={last}, new_cluster={new_cluster}"
         );
         self.write_fat(last, FatEntry::Next(new_cluster))?;
