@@ -64,6 +64,7 @@ impl Default for CanonicalPath {
     }
 }
 
+#[derive(Debug, Clone)]
 enum ResolvedTarget {
     Root,
     Entry {
@@ -73,14 +74,16 @@ enum ResolvedTarget {
     },
 }
 
-impl ResolvedTarget {
-    fn loc(&self) -> Option<DirEntryLoc> {
-        match self {
+impl From<ResolvedTarget> for Option<DirEntryLoc> {
+    fn from(value: ResolvedTarget) -> Self {
+        match value {
             ResolvedTarget::Root => None,
-            ResolvedTarget::Entry { loc, .. } => Some(*loc),
+            ResolvedTarget::Entry { loc, .. } => Some(loc),
         }
     }
+}
 
+impl ResolvedTarget {
     fn as_dir_cluster(&self) -> Result<ClusterId> {
         match self {
             ResolvedTarget::Root => Err(anyhow!("target is root, handle separately")),
@@ -178,8 +181,7 @@ impl Shell {
             "rmdir" => {
                 let target = self
                     .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: rmdir <path>"))?)?;
-                let loc = target
-                    .loc()
+                let loc = Option::<DirEntryLoc>::from(target)
                     .ok_or_else(|| anyhow!("cannot remove root directory"))?;
                 self.fs.rmdir(loc)?;
             }
@@ -194,16 +196,14 @@ impl Shell {
             "rm" => {
                 let target =
                     self.resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: rm <path>"))?)?;
-                let loc = target
-                    .loc()
+                let loc = Option::<DirEntryLoc>::from(target)
                     .ok_or_else(|| anyhow!("cannot remove root directory"))?;
                 self.fs.rm(loc)?;
             }
             "open" => {
                 let target = self
                     .resolve_target(parts.get(1).ok_or_else(|| anyhow!("usage: open <path>"))?)?;
-                let loc = target
-                    .loc()
+                let loc = Option::<DirEntryLoc>::from(target)
                     .ok_or_else(|| anyhow!("cannot open root directory"))?;
                 let handle = self.fs.open(loc)?;
                 println!("handle {handle}");
