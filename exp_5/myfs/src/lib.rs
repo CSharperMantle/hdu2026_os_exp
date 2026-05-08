@@ -765,7 +765,6 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
     }
 
     pub fn write_handle(&mut self, handle: FileHandle, data: &[u8]) -> Result<usize, FsError> {
-        // HACK: Don't make it interfere with mutable borrows.
         let file = self.get_open_file(handle)?.to_owned();
         debug!(
             "write(handle={handle}, loc={}, cursor={}, bytes={})",
@@ -773,22 +772,9 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
             file.cursor,
             data.len()
         );
-        let new_end = file.cursor + data.len();
-        let needed_clusters = if new_end == 0 {
-            0
-        } else {
-            new_end.div_ceil(self.cluster_size())
-        };
 
-        let mut fcb = self.read_fcb_at(file.loc)?;
-        fcb = self.ensure_fcb_chain_capacity(fcb, needed_clusters)?;
-        if !data.is_empty() {
-            self.write_chain_bytes(fcb.start_cluster, file.cursor, data)?;
-        }
-        if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
-            fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
-        }
-        fcb.touch()?;
+        let fcb = self.read_fcb_at(file.loc)?;
+        let (fcb, new_end) = self.do_growing_write(fcb, file.cursor, data)?;
         self.write_fcb_at(file.loc, &fcb)?;
 
         let open_entry = self.get_open_file_mut(handle)?;
@@ -1050,19 +1036,25 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         })
     }
 
-    fn write_fcb_data_at(
+    /// Extend chain if needed, write data, and update FCB size/mtime.
+    ///
+    /// On failure after chain extension, rolls back the newly allocated clusters.
+    fn do_growing_write(
         &mut self,
-        loc: DirEntryLoc,
         mut fcb: Fcb,
         offset: usize,
         data: &[u8],
-    ) -> Result<Fcb, FsError> {
-        if fcb.kind()? == NodeKind::Directory {
-            return Err(FsError::IsADirectory(fcb.short_name()));
-        }
+    ) -> Result<(Fcb, usize), FsError> {
         let new_end = offset
             .checked_add(data.len())
             .ok_or(FsError::SeekOutOfBounds(offset))?;
+        let old_cluster_count = if fcb.size == 0 {
+            0
+        } else {
+            usize::try_from(fcb.size)
+                .map(|s| s.div_ceil(self.cluster_size()))
+                .unwrap_or(0)
+        };
         let needed_clusters = if new_end == 0 {
             0
         } else {
@@ -1070,13 +1062,33 @@ impl<D: BufferedBlockDevice> MyFileSystem<D> {
         };
 
         fcb = self.ensure_fcb_chain_capacity(fcb, needed_clusters)?;
-        if !data.is_empty() {
-            self.write_chain_bytes(fcb.start_cluster, offset, data)?;
+
+        // Rollback on write failure: trim back to original chain length.
+        if !data.is_empty()
+            && let Err(err) = self.write_chain_bytes(fcb.start_cluster, offset, data)
+        {
+            self.trim_chain_len(fcb.start_cluster, old_cluster_count)?;
+            return Err(err);
         }
+
         if new_end > usize::try_from(fcb.size).expect("file size must fit into usize") {
             fcb.size = u32::try_from(new_end).expect("file size exceeds u32 range");
         }
         fcb.touch()?;
+        Ok((fcb, new_end))
+    }
+
+    fn write_fcb_data_at(
+        &mut self,
+        loc: DirEntryLoc,
+        fcb: Fcb,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<Fcb, FsError> {
+        if fcb.kind()? == NodeKind::Directory {
+            return Err(FsError::IsADirectory(fcb.short_name()));
+        }
+        let (fcb, _) = self.do_growing_write(fcb, offset, data)?;
         self.write_fcb_at(loc, &fcb)?;
         for open in self.open_files.iter_mut().flatten() {
             if open.loc == loc {
