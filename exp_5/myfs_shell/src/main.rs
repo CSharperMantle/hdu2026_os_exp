@@ -403,27 +403,7 @@ impl Shell {
     }
 }
 
-const HELP: &str = "\
-pwd
-cd <path>
-ls [path]
-mkdir <path>
-rmdir <path>
-create <path>
-rm <path>
-open <path>
-close <handle>
-read <handle> [len]
-write <handle>
-seek <handle> <offset>
-truncate <handle> <new_size>
-sync
-fat
-stat <path>
-openfiles
-help
-exit
-";
+const HELP: &str = include_str!("./help.txt");
 
 fn main() -> Result<()> {
     env_logger::init();
