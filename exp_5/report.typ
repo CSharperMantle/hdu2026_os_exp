@@ -43,27 +43,32 @@
 ]
 
 #img(
-  image("assets/phys_blocks.png", width: 85%),
+  image("assets/phys_blocks.png", width: 80%),
   caption: [物理块、逻辑块与 FAT 簇的关系],
 ) <figure:phys-blocks>
 
 按照教科书要求，实验中实现的磁盘布局为经简化的类 FAT16 结构@wikipedia2026fat。如@figure:disk 所示，逻辑块 0 为引导扇区，包含描述文件系统结构参数的元数据。其后依次为两份互为冗余的文件分配表副本 FAT#sub[1] 和 FAT#sub[2]。每个 FAT 表项为 2 字节。剩余区域为数据区域，用于存放目录与文件内容。与 FAT16 不同，本设计不设独立的根目录区域，而是将根目录作为一普通目录文件存放于数据区域起始处，起始簇号为 2，支持通过 FAT 链扩展按需增长。盘簇 0 的 FAT 表项作为空指针节点恒置为链结束标记，盘簇 1 同理。
 
 #img(
-  image("assets/disk.png", width: 85%),
+  image("assets/disk.png", width: 80%),
   caption: [类 FAT16 文件系统结构（图中大小未按比例缩放）],
 ) <figure:disk>
 
 #paragraph([引导信息扇区结构])[
-  引导扇区存储于物理块 0 的前缀位置，以固定长度记录文件系统的几何配置。其字段包括块大小、磁盘总块数、每簇块数、FAT 起始块号、每份 FAT 副本的块数、FAT 副本数、数据区域起始块号以及根目录起始簇号。重新打开已格式化磁盘时须从引导扇区读取这些参数并与实际设备信息进行一致性校验，以确保挂载的正确性。
+  引导扇区存储于物理块 0 的前缀位置，以固定长度记录文件系统的几何配置。其字段包括块大小、磁盘总块数、每簇块数、FAT 起始块号、每份 FAT 副本的块数、FAT 副本数、数据区域起始块号以及根目录起始簇号，如@figure:boot-sector-layout 所示。重新打开已格式化磁盘时须从引导扇区读取这些参数并与实际设备信息进行一致性校验，以确保挂载的正确性。
 ]
+
+#img(
+  image("assets/boot_sector_layout.png", width: 75%),
+  caption: [引导扇区信息组织结构],
+) <figure:boot-sector-layout>
 
 #paragraph([文件控制块结构])[
   文件控制块（FCB）是文件系统目录项的基本单元，以固定长度 16 字节记录文件的元信息。其字段包括文件名与扩展名、标记区分文件与目录的属性字节、修改时间与日期、文件起始簇号以及文件大小。文件名采用 FAT 标准的存储格式，使用大写 ASCII 编码，不足部分以空格填充；修改日期采用 FAT 风格的位压缩编码：日期占 7 位年份、4 位月份和 5 位日期，时间占 5 位小时、6 位分钟和 5 位秒数。
 ]
 
 #img(
-  image("assets/fcb_layout.png", width: 80%),
+  image("assets/fcb_layout.png", width: 75%),
   caption: [文件控制块结构],
 ) <figure:fcb-layout>
 
