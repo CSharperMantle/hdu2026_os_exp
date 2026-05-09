@@ -816,25 +816,33 @@ enum MountArgs {
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
-    #[arg(short = 'M', conflicts_with = "image", help = "Use memory-backed mode")]
+    #[arg(short = 'M', conflicts_with = "image", help = "Switch to memory-backed mode")]
     memory: bool,
     #[arg(
         short = 'i',
         long,
         value_name = "IMAGE",
         conflicts_with = "memory",
-        help = "Path to the formatted image"
+        help = "Path to the disk image. Conflicts with '-M'"
     )]
     image: Option<PathBuf>,
     #[arg(
         long,
         requires = "memory",
-        help = "Set the block size in bytes of the image"
+        help = "(Memory-backed mode) Set the block size in bytes of the image"
     )]
     block_size: Option<u16>,
-    #[arg(long, requires = "memory", help = "Set number of blocks in the image")]
+    #[arg(
+        long,
+        requires = "memory",
+        help = "(Memory-backed mode) Set number of blocks in the image"
+    )]
     block_count: Option<u16>,
-    #[arg(long, requires = "memory", help = "Set number of blocks in a cluster")]
+    #[arg(
+        long,
+        requires = "memory",
+        help = "(Memory-backed mode) Set number of blocks in a cluster"
+    )]
     blocks_per_cluster: Option<u16>,
     #[arg(value_name = "MOUNT", help = "The mount point")]
     mountpoint: PathBuf,
