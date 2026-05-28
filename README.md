@@ -53,3 +53,5 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the Licenses for the specific language governing permissions and
 limitations under the Licenses.
 ```
+
+**注意**：[assets/](assets/) 目录下的文件为第三方提供的素材、教案、模板等，依照每项素材内描述转载使用，不适用于上述许可协议。
